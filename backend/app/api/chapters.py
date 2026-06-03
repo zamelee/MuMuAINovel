@@ -1625,7 +1625,7 @@ async def generate_chapter_content_stream(
                 
                 logger.info(f"开始AI流式创作章节 {chapter_id}")
                 
-                # 🎨 方案一：将写作风格注入到系统提示词（最高优先级）
+                # 🎨 方案一：将写作风格注入到系统提示词（在满足字数要求的前提下尽量遵循风格）
                 system_prompt_with_style = None
                 
                 # ⚡ Skill 支持：当指定 skill_key 时，将 Skill 工作流注入系统提示词
@@ -1655,7 +1655,7 @@ async def generate_chapter_content_stream(
                         logger.warning(f"⚠️ 加载 Skill 失败: {skill_err}")
                 
                 if not system_prompt_with_style and style_content:
-                    system_prompt_with_style = f"""【🎨 写作风格要求 - 最高优先级】
+                    system_prompt_with_style = f"""【🎨 写作风格要求 - 在满足字数要求的前提下尽量遵循风格】
 
 {style_content}
 
@@ -1666,15 +1666,13 @@ async def generate_chapter_content_stream(
                 # 🔢 计算 max_tokens 限制
                 # 中文字符约 1.5-2 个 token，使用 2.5 倍系数确保有足够空间完成段落
                 # 同时设置上限防止过长，下限确保基本可用
-                calculated_max_tokens = int(target_word_count * 3)
-                calculated_max_tokens = max(2000, min(calculated_max_tokens, 16000))  # 限制在 2000-16000 之间
+                calculated_max_tokens = 16000  # 限制在 2000-16000 之间
                 logger.info(f"📊 目标字数: {target_word_count}, 计算 max_tokens: {calculated_max_tokens}")
                 
                 # 🔢 计算 max_tokens 限制
                 # 中文字符约 1.5-2 个 token，使用 2.5 倍系数确保有足够空间完成段落
                 # 同时设置上限防止过长，下限确保基本可用
-                calculated_max_tokens = int(target_word_count * 3)
-                calculated_max_tokens = max(2000, min(calculated_max_tokens, 16000))  # 限制在 2000-16000 之间
+                calculated_max_tokens = 16000  # 限制在 2000-16000 之间
                 logger.info(f"📊 目标字数: {target_word_count}, 计算 max_tokens: {calculated_max_tokens}")
                 
                 # 准备生成参数
@@ -2148,15 +2146,14 @@ async def _run_chapter_generation_bg(
 
     system_prompt_with_style = None
     if style_content:
-        system_prompt_with_style = f"""【🎨 写作风格要求 - 最高优先级】
+        system_prompt_with_style = f"""【🎨 写作风格要求 - 在满足字数要求的前提下尽量遵循风格】
 
 {style_content}
 
 ⚠️ 请严格遵循上述写作风格要求进行创作，这是最重要的指令！
 确保在整个章节创作过程中始终保持风格的一致性。"""
 
-    calculated_max_tokens = int(target_word_count * 3)
-    calculated_max_tokens = max(2000, min(calculated_max_tokens, 16000))
+    calculated_max_tokens = 16000
 
     generate_kwargs = {
         "prompt": prompt,
@@ -2630,15 +2627,14 @@ async def _run_chapter_generation_bg(
 
     system_prompt_with_style = None
     if style_content:
-        system_prompt_with_style = f"""【🎨 写作风格要求 - 最高优先级】
+        system_prompt_with_style = f"""【🎨 写作风格要求 - 在满足字数要求的前提下尽量遵循风格】
 
 {style_content}
 
 ⚠️ 请严格遵循上述写作风格要求进行创作，这是最重要的指令！
 确保在整个章节创作过程中始终保持风格的一致性。"""
 
-    calculated_max_tokens = int(target_word_count * 3)
-    calculated_max_tokens = max(2000, min(calculated_max_tokens, 16000))
+    calculated_max_tokens = 16000
 
     generate_kwargs = {
         "prompt": prompt,
@@ -4189,7 +4185,7 @@ async def generate_single_chapter_for_batch(
             logger.warning(f"⚠️ 批量生成 - 加载 Skill 失败: {skill_err}")
 
     if not system_prompt_with_style and style_content:
-        system_prompt_with_style = f"""【🎨 写作风格要求 - 最高优先级】
+        system_prompt_with_style = f"""【🎨 写作风格要求 - 在满足字数要求的前提下尽量遵循风格】
 
 {style_content}
 
@@ -4200,8 +4196,7 @@ async def generate_single_chapter_for_batch(
     # 🔢 计算 max_tokens 限制（批量生成）
     # 中文字符约 1.5-2 个 token，使用 2.5 倍系数确保有足够空间完成段落
     # 同时设置上限防止过长，下限确保基本可用
-    calculated_max_tokens = int(target_word_count * 3)
-    calculated_max_tokens = max(2000, min(calculated_max_tokens, 16000))  # 限制在 2000-16000 之间
+    calculated_max_tokens = 16000  # 限制在 2000-16000 之间
     logger.info(f"📊 批量生成 - 目标字数: {target_word_count}, 计算 max_tokens: {calculated_max_tokens}")
     
     # 非流式生成内容
