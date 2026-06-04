@@ -58,6 +58,7 @@ from app.services.foreshadow_service import foreshadow_service
 from app.services.chapter_regenerator import ChapterRegenerator
 from app.logger import get_logger
 from app.api.settings import get_user_ai_service, get_user_ai_service_from_db_by_usage
+from app.config import settings
 from app.utils.sse_response import SSEResponse, create_sse_response
 
 router = APIRouter(prefix="/chapters", tags=["章节管理"])
@@ -73,6 +74,31 @@ async def get_db_write_lock(user_id: str) -> Lock:
         db_write_locks[user_id] = Lock()
         logger.debug(f"🔒 为用户 {user_id} 创建数据库写入锁")
     return db_write_locks[user_id]
+
+
+def _get_ai_service_token_ceiling(ai_service: Optional[AIService]) -> int:
+    """Return the configured LLM max_tokens ceiling for the current user/service."""
+    configured_max_tokens = getattr(ai_service, "default_max_tokens", None)
+    if configured_max_tokens is None or configured_max_tokens <= 0:
+        configured_max_tokens = settings.default_max_tokens
+    return max(1, int(configured_max_tokens))
+
+
+def _calculate_generation_max_tokens(
+    target_word_count: int,
+    ai_service: Optional[AIService],
+    extra_prompt_text: Optional[str] = None,
+    minimum_tokens: int = 2000,
+    output_token_multiplier: float = 2.0,
+    prompt_char_token_ratio: float = 0.5,
+) -> int:
+    """Estimate generation max_tokens while respecting the configured LLM ceiling."""
+    base_output_tokens = int(target_word_count * output_token_multiplier)
+    extra_prompt_chars = len(extra_prompt_text or "")
+    extra_tokens = int(extra_prompt_chars * prompt_char_token_ratio)
+    calculated_max_tokens = base_output_tokens + extra_tokens
+    calculated_max_tokens = max(minimum_tokens, calculated_max_tokens)
+    return min(calculated_max_tokens, _get_ai_service_token_ceiling(ai_service))
 
 
 @router.post("", response_model=ChapterResponse, summary="创建章节")
@@ -1666,14 +1692,16 @@ async def generate_chapter_content_stream(
                 # 🔢 计算 max_tokens 限制
                 # 中文字符约 1.5-2 个 token，使用 2.5 倍系数确保有足够空间完成段落
                 # 同时设置上限防止过长，下限确保基本可用
-                calculated_max_tokens = 16000  # 限制在 2000-16000 之间
-                logger.info(f"📊 目标字数: {target_word_count}, 计算 max_tokens: {calculated_max_tokens}")
-                
-                # 🔢 计算 max_tokens 限制
-                # 中文字符约 1.5-2 个 token，使用 2.5 倍系数确保有足够空间完成段落
-                # 同时设置上限防止过长，下限确保基本可用
-                calculated_max_tokens = 16000  # 限制在 2000-16000 之间
-                logger.info(f"📊 目标字数: {target_word_count}, 计算 max_tokens: {calculated_max_tokens}")
+                calculated_max_tokens = _calculate_generation_max_tokens(
+                    target_word_count=target_word_count,
+                    ai_service=user_ai_service,
+                    extra_prompt_text=system_prompt_with_style,
+                    minimum_tokens=2000,
+                )
+                logger.info(
+                    f"📊 目标字数: {target_word_count}, 计算 max_tokens: {calculated_max_tokens}, "
+                    f"LLM上限: {_get_ai_service_token_ceiling(user_ai_service)}"
+                )
                 
                 # 准备生成参数
                 generate_kwargs = {
@@ -2153,7 +2181,12 @@ async def _run_chapter_generation_bg(
 ⚠️ 请严格遵循上述写作风格要求进行创作，这是最重要的指令！
 确保在整个章节创作过程中始终保持风格的一致性。"""
 
-    calculated_max_tokens = 16000
+    calculated_max_tokens = _calculate_generation_max_tokens(
+        target_word_count=target_word_count,
+        ai_service=user_ai_service,
+        extra_prompt_text=system_prompt_with_style,
+        minimum_tokens=2000,
+    )
 
     generate_kwargs = {
         "prompt": prompt,
@@ -2634,7 +2667,12 @@ async def _run_chapter_generation_bg(
 ⚠️ 请严格遵循上述写作风格要求进行创作，这是最重要的指令！
 确保在整个章节创作过程中始终保持风格的一致性。"""
 
-    calculated_max_tokens = 16000
+    calculated_max_tokens = _calculate_generation_max_tokens(
+        target_word_count=target_word_count,
+        ai_service=user_ai_service,
+        extra_prompt_text=system_prompt_with_style,
+        minimum_tokens=2000,
+    )
 
     generate_kwargs = {
         "prompt": prompt,
@@ -4196,8 +4234,16 @@ async def generate_single_chapter_for_batch(
     # 🔢 计算 max_tokens 限制（批量生成）
     # 中文字符约 1.5-2 个 token，使用 2.5 倍系数确保有足够空间完成段落
     # 同时设置上限防止过长，下限确保基本可用
-    calculated_max_tokens = 16000  # 限制在 2000-16000 之间
-    logger.info(f"📊 批量生成 - 目标字数: {target_word_count}, 计算 max_tokens: {calculated_max_tokens}")
+    calculated_max_tokens = _calculate_generation_max_tokens(
+        target_word_count=target_word_count,
+        ai_service=user_ai_service,
+        extra_prompt_text=system_prompt_with_style,
+        minimum_tokens=2000,
+    )
+    logger.info(
+        f"📊 批量生成 - 目标字数: {target_word_count}, 计算 max_tokens: {calculated_max_tokens}, "
+        f"LLM上限: {_get_ai_service_token_ceiling(user_ai_service)}"
+    )
     
     # 非流式生成内容
     full_content = ""
@@ -4936,7 +4982,13 @@ async def partial_regenerate_stream(
             else:
                 target_words = int(original_word_count * 1.5)
             
-            calculated_max_tokens = max(500, min(int(target_words * 3), 8000))
+            calculated_max_tokens = _calculate_generation_max_tokens(
+                target_word_count=target_words,
+                ai_service=user_ai_service,
+                extra_prompt_text=prompt,
+                minimum_tokens=500,
+                output_token_multiplier=3.0,
+            )
             
             # 流式生成
             full_content = ""
