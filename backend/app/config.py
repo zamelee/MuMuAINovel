@@ -164,7 +164,7 @@ def get_or_create_instance_id() -> str:
     # Client 模式：从文件读取或生成
     instance_file = PROJECT_ROOT / ".instance_id"
     if instance_file.exists():
-        with open(instance_file, 'r') as f:
+        with open(instance_file, 'r', encoding='utf-8') as f:
             instance_id = f.read().strip()
             if instance_id and instance_id != "server":  # 确保不与 server 冲突
                 return instance_id
@@ -172,7 +172,7 @@ def get_or_create_instance_id() -> str:
     # 生成新的实例ID
     instance_id = str(uuid.uuid4())[:12]
     try:
-        with open(instance_file, 'w') as f:
+        with open(instance_file, 'w', encoding='utf-8') as f:
             f.write(instance_id)
         config_logger.info(f"生成新的实例标识: {instance_id}")
     except Exception as e:

@@ -1,4 +1,9 @@
-"""FastAPI应用主入口"""
+﻿"""FastAPI应用主入口"""
+import sys
+
+# 强制 UTF-8 输出，防止中文 Windows 下 GBK 编码导致乱码
+sys.stdout.reconfigure(encoding='utf-8')
+
 from fastapi import FastAPI, Request, status, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
