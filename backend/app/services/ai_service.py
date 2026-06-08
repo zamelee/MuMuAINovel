@@ -5,6 +5,47 @@
 - 如果有启用的MCP插件且有可用工具，自动发送tools
 - 通过 auto_mcp 参数控制是否启用自动工具加载
 """
+import re
+
+
+def _strip_thinking(buf: str, in_think: bool):
+    """Strip think blocks from streaming text.
+    Returns (clean_output, remaining_buffer, still_in_think)."""
+    result = []
+    while buf:
+        if not in_think:
+            m = re.search(r"<\s*think[\s>]", buf, re.IGNORECASE)
+            if m:
+                result.append(buf[:m.start()])
+                buf = buf[m.start():]
+                gt = buf.find(">")
+                if gt != -1:
+                    buf = buf[gt + 1:]
+                    in_think = True
+                else:
+                    return "".join(result), buf, False
+            else:
+                last_lt = buf.rfind("<")
+                if last_lt != -1 and len(buf) - last_lt <= 10:
+                    tail = buf[last_lt:].lower()
+                    if any(tail.startswith(p) for p in ["<t", "<th", "<thi", "<thin", "<think"]):
+                        result.append(buf[:last_lt])
+                        return "".join(result), buf[last_lt:], False
+                result.append(buf)
+                return "".join(result), "", False
+        else:
+            m = re.search(r"<\s*/\s*think\s*>", buf, re.IGNORECASE)
+            if m:
+                buf = buf[m.end():]
+                in_think = False
+            else:
+                last_lt = buf.rfind("<")
+                if last_lt != -1 and len(buf) - last_lt <= 12:
+                    tail = buf[last_lt:].lower()
+                    if any(tail.startswith(p) for p in ["<", "</", "</t", "</th", "</thi", "</thin", "</think"]):
+                        return "".join(result), buf[last_lt:], True
+                return "".join(result), "", True
+    return "".join(result), "", in_think
 from typing import Optional, AsyncGenerator, List, Dict, Any, Union
 
 from app.config import settings as app_settings
@@ -20,6 +61,7 @@ from app.services.ai_providers.anthropic_provider import AnthropicProvider
 from app.services.ai_providers.gemini_provider import GeminiProvider
 from app.services.ai_providers.base_provider import BaseAIProvider
 from app.services.json_helper import clean_json_response, parse_json
+from app.utils.prompt_logger import log_prompt, log_response
 
 # 导出清理函数
 cleanup_http_clients = cleanup_all_clients
@@ -443,6 +485,8 @@ class AIService:
         )
         
         try:
+            # [LLM] send probe
+            log_prompt("text", system_prompt, prompt)
             prov = self._get_provider(provider)
             response = await prov.generate(
                 prompt=prompt,
@@ -473,9 +517,18 @@ class AIService:
                 if tool_metrics:
                     metrics.merge_tool_metrics(tool_metrics)
 
+            # Strip think tags from non-streaming response
+            content_text = response.get("content", "") or ""
+            content_text = re.sub(r"<\s*think[\s>].*?<\s*/\s*think\s*>", "", content_text, flags=re.DOTALL | re.IGNORECASE)
+            content_text = re.sub(r"<\s*think\s*>.*?<\s*/\s*think\s*>", "", content_text, flags=re.DOTALL | re.IGNORECASE)
+            response["content"] = content_text
+
+            # [LLM] recv probe
+            log_response("text", content_text, response.get("finish_reason"), usage.prompt_tokens, usage.completion_tokens, usage.total_tokens)
+
             metrics.finish(
                 success=True,
-                response_length=len(response.get("content", "") or ""),
+                response_length=len(content_text),
                 finish_reason=response.get("finish_reason"),
                 usage=usage,
             )
@@ -539,9 +592,13 @@ class AIService:
         response_parts: List[str] = []
         latest_usage = TokenUsage()
         finish_reason = "stop"
+        _think_buf = ""
+        _in_think = False
         
         try:
             # 流式生成（Provider 层处理工具调用）
+            # [LLM] send probe
+            log_prompt("stream", system_prompt, prompt)
             prov = self._get_provider(provider)
             logger.debug(f"🔧 开始流式生成，provider={provider or self.api_provider}, tools_count={len(tools_to_use) if tools_to_use else 0}")
             async for chunk in prov.generate_stream(
@@ -562,10 +619,19 @@ class AIService:
                     continue
 
                 if chunk:
-                    metrics.mark_first_chunk()
-                    metrics.chunk_count += 1
-                    response_parts.append(chunk)
+                    # Stateful think-tag stripping (handles cross-chunk tags)
+                    _think_buf += chunk
+                    chunk, _think_buf, _in_think = _strip_thinking(_think_buf, _in_think)
+                    if chunk:
+                        metrics.mark_first_chunk()
+                        metrics.chunk_count += 1
+                        response_parts.append(chunk)
                 yield chunk
+
+            # Flush remaining buffer after stream ends
+            if _think_buf and not _in_think:
+                response_parts.append(_think_buf)
+                yield _think_buf
 
             metrics.finish(
                 success=True,
@@ -573,6 +639,8 @@ class AIService:
                 finish_reason=finish_reason,
                 usage=latest_usage,
             )
+            # [LLM] recv probe
+            log_response("stream", "".join(response_parts), finish_reason, latest_usage.prompt_tokens, latest_usage.completion_tokens, latest_usage.total_tokens)
             self._log_call_metrics(metrics)
         except Exception as e:
             metrics.finish(
@@ -750,3 +818,7 @@ def create_user_ai_service_with_mcp(
         db_session=db_session,
         enable_mcp=enable_mcp,
     )
+
+
+
+

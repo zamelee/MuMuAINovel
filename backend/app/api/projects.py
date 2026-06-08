@@ -776,3 +776,82 @@ async def import_project(
     except Exception as e:
         logger.error(f"导入项目失败: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"导入失败: {str(e)}")
+# ==================== 项目健康检查 ====================
+
+@router.get("/{project_id}/health", summary="项目要素健康检查")
+async def project_health_check(
+    project_id: str,
+    db: AsyncSession = Depends(get_db)
+):
+    """检测项目各要素的完整性，返回缺失清单"""
+    result = {
+        "project_id": project_id,
+        "chapters_missing_anchor": 0,
+        "chapters_missing_anchor_ids": [],
+        "chapters_missing_analysis": 0,
+        "chapters_missing_analysis_ids": [],
+        "chapters_stale_analysis": 0,
+        "chapters_stale_analysis_ids": [],
+        "total_issues": 0,
+    }
+
+    try:
+        # 1. 章节缺失锚点
+        chapters_missing_anchor_rows = await db.execute(
+            select(Chapter.id, Chapter.title).where(
+                Chapter.project_id == project_id,
+                (Chapter.end_anchor == None) | (Chapter.end_anchor == '')
+            )
+        )
+        for row in chapters_missing_anchor_rows:
+            result["chapters_missing_anchor_ids"].append({"id": row[0], "title": row[1]})
+        result["chapters_missing_anchor"] = len(result["chapters_missing_anchor_ids"])
+
+        # 2. 章节缺失分析 & 分析过期
+        chapters_with_content = await db.execute(
+            select(Chapter.id, Chapter.title, Chapter.outline_id).where(
+                Chapter.project_id == project_id,
+                Chapter.content != None,
+                Chapter.content != ''
+            )
+        )
+        chapter_ids = []
+        for row in chapters_with_content:
+            chapter_ids.append({"id": row[0], "title": row[1], "outline_id": row[2]})
+
+        if chapter_ids:
+            # 批量查询已有分析记录
+            from app.models.memory import PlotAnalysis
+            ids = [c["id"] for c in chapter_ids]
+            existing_analyses = await db.execute(
+                select(PlotAnalysis.chapter_id, PlotAnalysis.anchor_compliance_score).where(
+                    PlotAnalysis.chapter_id.in_(ids)
+                )
+            )
+            analysis_map = {row[0]: row[1] for row in existing_analyses}
+
+            for ch in chapter_ids:
+                if ch["id"] not in analysis_map:
+                    # 完全没有分析记录
+                    result["chapters_missing_analysis_ids"].append({
+                        "id": ch["id"], "title": ch["title"]
+                    })
+                elif analysis_map[ch["id"]] is None and ch["outline_id"]:
+                    # 有分析但缺锚点评分（且有关联大纲才需要）
+                    result["chapters_stale_analysis_ids"].append({
+                        "id": ch["id"], "title": ch["title"]
+                    })
+
+        result["chapters_missing_analysis"] = len(result["chapters_missing_analysis_ids"])
+        result["chapters_stale_analysis"] = len(result["chapters_stale_analysis_ids"])
+        result["total_issues"] = (
+            result["chapters_missing_anchor"] +
+            result["chapters_missing_analysis"] +
+            result["chapters_stale_analysis"]
+        )
+
+    except Exception as e:
+        logger.error(f"项目健康检查失败: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"健康检查失败: {str(e)}")
+
+    return result

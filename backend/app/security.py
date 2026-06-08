@@ -74,8 +74,12 @@ def _is_forbidden_ip(ip: ipaddress._BaseAddress) -> bool:
     ])
 
 
-def validate_public_http_url(raw_url: str, *, allowed_schemes: Iterable[str] = ("https", "http")) -> str:
-    """Validate an outbound URL to reduce SSRF risk."""
+def validate_public_http_url(raw_url: str, *, skip_private_check: bool = False, allowed_schemes: Iterable[str] = ("https", "http")) -> str:
+    """Validate an outbound URL to reduce SSRF risk.
+
+    Set skip_private_check=True to allow private/internal IP addresses
+    (e.g. for local LLM servers like Ollama).
+    """
     if not raw_url or not isinstance(raw_url, str):
         raise HTTPException(status_code=400, detail="URL不能为空")
 
@@ -88,21 +92,23 @@ def validate_public_http_url(raw_url: str, *, allowed_schemes: Iterable[str] = (
         raise HTTPException(status_code=400, detail="URL不允许包含认证信息")
 
     host = parsed.hostname.strip().rstrip(".")
-    if host.lower() in {"localhost", "localhost.localdomain"}:
-        raise HTTPException(status_code=400, detail="URL不允许指向本机地址")
 
-    try:
-        ip = ipaddress.ip_address(host)
-        if _is_forbidden_ip(ip):
-            raise HTTPException(status_code=400, detail="URL不允许指向内网或保留地址")
-    except ValueError:
+    if not skip_private_check:
+        if host.lower() in {"localhost", "localhost.localdomain"}:
+            raise HTTPException(status_code=400, detail="URL不允许指向本机地址")
+
         try:
-            infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
-        except socket.gaierror:
-            raise HTTPException(status_code=400, detail="URL主机名无法解析")
-        for info in infos:
-            resolved_ip = ipaddress.ip_address(info[4][0])
-            if _is_forbidden_ip(resolved_ip):
-                raise HTTPException(status_code=400, detail="URL解析到内网或保留地址")
+            ip = ipaddress.ip_address(host)
+            if _is_forbidden_ip(ip):
+                raise HTTPException(status_code=400, detail="URL不允许指向内网或保留地址")
+        except ValueError:
+            try:
+                infos = socket.getaddrinfo(host, parsed.port or (443 if parsed.scheme == "https" else 80), type=socket.SOCK_STREAM)
+            except socket.gaierror:
+                raise HTTPException(status_code=400, detail="URL主机名无法解析")
+            for info in infos:
+                resolved_ip = ipaddress.ip_address(info[4][0])
+                if _is_forbidden_ip(resolved_ip):
+                    raise HTTPException(status_code=400, detail="URL解析到内网或保留地址")
 
     return raw_url.strip().rstrip("/")

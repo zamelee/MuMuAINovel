@@ -47,8 +47,8 @@ class ForeshadowBase(BaseModel):
     
     # 重要性
     importance: float = Field(0.5, ge=0.0, le=1.0, description="重要性评分 0.0-1.0")
-    strength: int = Field(5, ge=1, le=10, description="伏笔强度 1-10")
-    subtlety: int = Field(5, ge=1, le=10, description="隐藏度 1-10")
+    strength: float = Field(5, ge=1, le=10, description="伏笔强度 1-10")
+    subtlety: float = Field(5, ge=1, le=10, description="隐藏度 1-10")
     
     # 关联信息
     related_characters: Optional[List[str]] = Field(None, description="关联角色名列表")
@@ -84,8 +84,8 @@ class ForeshadowUpdate(BaseModel):
     is_long_term: Optional[bool] = None
     
     importance: Optional[float] = Field(None, ge=0.0, le=1.0)
-    strength: Optional[int] = Field(None, ge=1, le=10)
-    subtlety: Optional[int] = Field(None, ge=1, le=10)
+    strength: Optional[float] = Field(None, ge=1, le=10)
+    subtlety: Optional[float] = Field(None, ge=1, le=10)
     urgency: Optional[int] = Field(None, ge=0, le=3)
     
     related_characters: Optional[List[str]] = None

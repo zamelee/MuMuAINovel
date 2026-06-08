@@ -149,3 +149,7 @@ class ChapterAnalysisPresetSelectionRequest(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
     preset_id: Optional[str] = Field(None, description="章节内容分析使用的预设ID；为空则使用默认API配置")
+
+class SystemSecuritySettings(BaseModel):
+    model_config = ConfigDict(protected_namespaces=())
+    allow_private_api_url: bool = Field(default=False, description="Allow private/local IP addresses as API base URL (e.g. for Ollama, LocalAI)")

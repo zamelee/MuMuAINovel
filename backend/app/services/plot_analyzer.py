@@ -596,3 +596,179 @@ def get_plot_analyzer(ai_service: AIService) -> PlotAnalyzer:
     if _plot_analyzer_instance is None:
         _plot_analyzer_instance = PlotAnalyzer(ai_service)
     return _plot_analyzer_instance
+
+
+# ==================== 锚点合规检测器 ====================
+
+def validate_end_anchor(chapter_content: str, end_anchor_raw: str, strategy: str = "A+B", embedding_threshold: float = 0.7) -> dict:
+    """
+    初步检测：正文结尾是否命中锚点画面。
+    
+    策略 A: jieba 中文分词（快速，解决修饰词插入）
+    策略 B: MiniLM embedding 语义相似度（智能，解决同义词替换）
+    策略 A+B: jieba 优先，低分时 embedding 兜底（默认）
+    """
+    if not end_anchor_raw or len(end_anchor_raw) < 5:
+        return {"compliance_score": None, "violation": None, "auto_suggestion": None}
+
+    import re
+    stop_words = {"的", "了", "在", "是", "有", "和", "就", "不", "人", "都", "一", "一个", "上", "也", "很", "到", "说", "要", "去", "你", "会", "着", "没有", "看", "好", "自己", "这"}
+    tail = chapter_content[-500:] if len(chapter_content) > 500 else chapter_content
+    anchor_clean = end_anchor_raw.rstrip("。！？….,;:!?")
+
+    def _score_by_jieba():
+        try:
+            import jieba
+        except ImportError:
+            words = re.findall(r"[一-鿿]{2,}", anchor_clean)
+            keywords = [w for w in words if w not in stop_words]
+            if not keywords:
+                return None
+            matched = sum(1 for kw in keywords if kw in tail)
+            return matched / len(keywords), keywords
+        words = list(jieba.cut(anchor_clean))
+        keywords = [w for w in words if len(w) >= 2 and w not in stop_words]
+        if not keywords:
+            return None
+        tail_words = list(jieba.cut(tail))
+        tail_set = set(tail_words)
+        matched = sum(1 for kw in keywords if kw in tail_set)
+        return matched / len(keywords), keywords
+
+    def _score_by_embedding():
+        try:
+            from sentence_transformers import SentenceTransformer
+            from pathlib import Path
+            import os
+            model_dir = Path(__file__).resolve().parent.parent.parent / "embedding"
+            snapshot_dir = model_dir / "models--sentence-transformers--paraphrase-multilingual-MiniLM-L12-v2" / "snapshots"
+            if snapshot_dir.exists():
+                snaps = os.listdir(snapshot_dir)
+                if snaps:
+                    model = SentenceTransformer(str(snapshot_dir / snaps[0]))
+                else:
+                    model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+            else:
+                model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+            emb_anchor = model.encode(anchor_clean, convert_to_numpy=True)
+            emb_tail = model.encode(tail, convert_to_numpy=True)
+            import numpy as np
+            dot = float(np.dot(emb_anchor, emb_tail))
+            norm = float(np.linalg.norm(emb_anchor) * np.linalg.norm(emb_tail) + 1e-8)
+            return dot / norm, []
+        except Exception:
+            return None
+
+    score = None
+    ratio = 0.0
+
+    if strategy in ("A", "A+B"):
+        result = _score_by_jieba()
+        if result:
+            ratio, _ = result
+
+    if strategy == "B":
+        result = _score_by_embedding()
+        if result:
+            cosine, _ = result
+            if cosine >= 0.85:
+                score = 9
+            elif cosine >= embedding_threshold:
+                score = max(4, int(5 + (cosine - embedding_threshold) / (0.85 - embedding_threshold) * 5))
+            else:
+                score = max(1, int(cosine * 10))
+            ratio = cosine
+    elif strategy == "A+B":
+        if ratio >= 0.5:
+            score = min(10, int(5 + ratio * 5))
+        else:
+            emb_result = _score_by_embedding()
+            if emb_result:
+                cosine, _ = emb_result
+                if cosine >= embedding_threshold:
+                    js = max(1, int(ratio * 10)) if ratio > 0 else 1
+                    if cosine >= 0.85:
+                        es = 9
+                    else:
+                        es = max(4, int(5 + (cosine - embedding_threshold) / (0.85 - embedding_threshold) * 5))
+                    score = max(js, es)
+                    ratio = max(ratio, cosine * 0.1)
+                else:
+                    score = max(1, int(ratio * 10)) if ratio > 0 else 1
+            else:
+                score = max(1, int(ratio * 10)) if ratio > 0 else 1
+    elif strategy == "A":
+        if ratio > 0:
+            if ratio >= 0.5:
+                score = min(10, int(5 + ratio * 5))
+            else:
+                score = max(1, int(ratio * 10))
+
+    if score is None:
+        score = 1
+
+    if score >= 7:
+        return {"compliance_score": score, "violation": None, "auto_suggestion": None}
+    else:
+        return {
+            "compliance_score": score,
+            "violation": f"正文结尾未命中锚点描述画面（匹配率 {ratio:.0%}）",
+            "auto_suggestion": (
+                f"【初步检测】本章锚点为'{end_anchor_raw}'，"
+                f"但正文结尾未充分匹配锚点画面（匹配率{ratio:.0%}）。"
+                f"可能已越过锚点位置，建议检查并裁掉锚点之后的内容。"
+            )
+        }
+
+
+def outline_boundary_check(chapter_content: str, next_outline_content: str, embedding_threshold: float = 0.7) -> dict:
+    """
+    初步检测：本章后半部分是否越过了当前章节大纲边界，即是否包含了下一章的内容。
+
+    策略：取章节后50%内容，与下一章大纲做 embedding 余弦相似度比较。
+    如果相似度超过阈值，说明可能已越界（抢跑）到下一章。
+    """
+    if not chapter_content or not next_outline_content:
+        return {"boundary_ok": True, "similarity": 0.0, "suggestion": None}
+
+    # 取章节后半部分
+    half_len = len(chapter_content) // 2
+    latter_half = chapter_content[half_len:]
+
+    try:
+        from sentence_transformers import SentenceTransformer
+        from pathlib import Path
+        import os, numpy as np
+
+        model_dir = Path(__file__).resolve().parent.parent.parent / "embedding"
+        snapshot_dir = model_dir / "models--sentence-transformers--paraphrase-multilingual-MiniLM-L12-v2" / "snapshots"
+        if snapshot_dir.exists():
+            snaps = os.listdir(snapshot_dir)
+            if snaps:
+                model = SentenceTransformer(str(snapshot_dir / snaps[0]))
+            else:
+                model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+        else:
+            model = SentenceTransformer("paraphrase-multilingual-MiniLM-L12-v2")
+
+        emb_chapter = model.encode(latter_half[:2000], convert_to_numpy=True)
+        emb_outline = model.encode(next_outline_content[:2000], convert_to_numpy=True)
+
+        dot = float(np.dot(emb_chapter, emb_outline))
+        norm = float(np.linalg.norm(emb_chapter) * np.linalg.norm(emb_outline) + 1e-8)
+        similarity = dot / norm
+
+        boundary_ok = similarity < embedding_threshold
+        suggestion = None
+        if not boundary_ok:
+            suggestion = (
+                f"【初步检测】章节后半部分与下一章大纲语义相似度较高（{similarity:.0%}），"
+                f"可能已越过当前章节边界，建议检查是否抢跑。"
+            )
+
+        return {"boundary_ok": boundary_ok, "similarity": similarity, "suggestion": suggestion}
+
+    except Exception as e:
+        import logging
+        logging.getLogger("app.services.plot_analyzer").warning(f"大纲越界检测失败: {e}")
+        return {"boundary_ok": True, "similarity": 0.0, "suggestion": None}

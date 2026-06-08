@@ -1,4 +1,4 @@
-﻿"""FastAPI应用主入口"""
+"""FastAPI应用主入口"""
 import sys
 
 # 强制 UTF-8 输出，防止中文 Windows 下 GBK 编码导致乱码
@@ -73,6 +73,35 @@ async def lifespan(app: FastAPI):
         logger.info("后台任务表检查完成")
     except Exception as e:
         logger.warning(f"后台任务表检查失败（不影响启动）: {e}")
+
+
+    # === Codex: 确保 end_anchor 和 anchor_compliance_score 列存在 ===
+    try:
+        _migrate_engine = await get_engine("system")
+        async with _migrate_engine.begin() as conn:
+            await conn.run_sync(
+                lambda sync_conn: sync_conn.execute(
+                    __import__("sqlalchemy").text(
+                        "ALTER TABLE outlines ADD COLUMN end_anchor TEXT"
+                    )
+                )
+            )
+        logger.info("✅ 列迁移: outlines.end_anchor")
+    except Exception:
+        pass
+    try:
+        _migrate_engine2 = await get_engine("system")
+        async with _migrate_engine2.begin() as conn:
+            await conn.run_sync(
+                lambda sync_conn: sync_conn.execute(
+                    __import__("sqlalchemy").text(
+                        "ALTER TABLE plot_analysis ADD COLUMN anchor_compliance_score FLOAT"
+                    )
+                )
+            )
+        logger.info("✅ 列迁移: plot_analyses.anchor_compliance_score")
+    except Exception:
+        pass
 
     logger.info("应用启动完成")
     

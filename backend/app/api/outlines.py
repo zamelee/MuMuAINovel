@@ -1,9 +1,11 @@
 """大纲管理API"""
 from fastapi import APIRouter, Depends, HTTPException, Request
+from app.api.settings import get_user_ai_service_from_db_by_usage
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select, func, delete
 from typing import List, AsyncGenerator, Dict, Any
 import json
+import asyncio
 
 from app.database import get_db
 from app.api.common import verify_project_access
@@ -2972,7 +2974,8 @@ async def get_outline_chapters(
                 "narrative_goal": plan_data.get("narrative_goal", "") if plan_data else "",
                 "conflict_type": plan_data.get("conflict_type", "") if plan_data else "",
                 "estimated_words": plan_data.get("estimated_words", 0) if plan_data else 0,
-                "scenes": plan_data.get("scenes") if plan_data else None
+                "scenes": plan_data.get("scenes") if plan_data else None,
+                "end_anchor": chapter.end_anchor or None,
             })
     
     return {
@@ -3383,3 +3386,5 @@ async def create_chapters_from_existing_plans(
         logger.error(f"根据已有规划创建章节失败: {str(e)}", exc_info=True)
         await db.rollback()
         raise HTTPException(status_code=500, detail=f"创建章节失败: {str(e)}")
+
+

@@ -15,6 +15,7 @@ class ChapterBase(BaseModel):
     outline_id: Optional[str] = Field(None, description="关联的大纲ID")
     sub_index: Optional[int] = Field(1, description="大纲下的子章节序号")
     expansion_plan: Optional[str] = Field(None, description="展开规划详情(JSON)")
+    end_anchor: Optional[str] = Field(None, description="结束锚点：本章最后一个画面描述")
 
 
 class ChapterCreate(BaseModel):
@@ -28,6 +29,7 @@ class ChapterCreate(BaseModel):
     outline_id: Optional[str] = Field(None, description="关联的大纲ID")
     sub_index: Optional[int] = Field(1, description="大纲下的子章节序号")
     expansion_plan: Optional[str] = Field(None, description="展开规划详情(JSON)")
+    end_anchor: Optional[str] = Field(None, description="结束锚点：本章最后一个画面描述")
 
 
 class ChapterUpdate(BaseModel):
@@ -38,6 +40,7 @@ class ChapterUpdate(BaseModel):
     summary: Optional[str] = None
     # word_count 自动计算，不允许手动修改
     status: Optional[str] = None
+    end_anchor: Optional[str] = None
 
 
 class ChapterResponse(BaseModel):
@@ -55,6 +58,7 @@ class ChapterResponse(BaseModel):
     expansion_plan: Optional[str] = None
     outline_title: Optional[str] = None  # 大纲标题（从Outline表联查）
     outline_order: Optional[int] = None  # 大纲排序序号（从Outline表联查）
+    end_anchor: Optional[str] = None  # 结束锚点
     created_at: datetime
     updated_at: datetime
     
@@ -122,6 +126,21 @@ class ChapterGenerateRequest(BaseModel):
     model: Optional[str] = Field(None, description="指定使用的AI模型，不提供则使用用户默认模型")
     narrative_perspective: Optional[str] = Field(None, description="临时人称视角：first_person/third_person/omniscient，不提供则使用项目默认")
     skill_key: Optional[str] = Field(None, description="Skill 标识，指定后以该 Skill 的工作流指导创作")
+    quick_check_strategy: Optional[str] = Field(
+        "A+B",
+        description="初步检测策略：A(jieba分词)、B(embedding语义)、A+B(分词+语义兜底)",
+    )
+    quick_check_threshold: Optional[float] = Field(
+        0.7,
+        description="Embedding语义相似度阈值（0.5~0.95），高于此值视为命中锚点",
+        ge=0.5, le=0.95
+    )
+
+    char_token_ratio: Optional[float] = Field(
+        1.5,
+        description="中文字符->token换算倍率。1个中文字约等于几个token",
+        ge=1.0, le=5.0
+    )
 
 
 class BatchGenerateRequest(BaseModel):
@@ -137,6 +156,21 @@ class BatchGenerateRequest(BaseModel):
     )
     enable_analysis: bool = Field(False, description="是否启用同步分析")
     enable_mcp: bool = Field(True, description="是否启用MCP工具增强（搜索参考资料）")
+    quick_check_strategy: Optional[str] = Field(
+        "A+B",
+        description="初步检测策略：A(jieba分词)、B(embedding语义)、A+B(分词+语义兜底)",
+    )
+    quick_check_threshold: Optional[float] = Field(
+        0.7,
+        description="Embedding语义相似度阈值（0.5~0.95），高于此值视为命中锚点",
+        ge=0.5, le=0.95
+    )
+
+    char_token_ratio: Optional[float] = Field(
+        1.5,
+        description="中文字符->token换算倍率",
+        ge=1.0, le=5.0
+    )
     max_retries: int = Field(3, description="每个章节的最大重试次数", ge=0, le=5)
     model: Optional[str] = Field(None, description="指定使用的AI模型，不提供则使用用户默认模型")
     narrative_perspective: Optional[str] = Field(None, description="临时指定叙事人称，不提供则使用项目默认")

@@ -358,6 +358,7 @@ export interface Chapter {
   word_count: number;
   status: 'draft' | 'writing' | 'completed';
   expansion_plan?: string; // JSON字符串，解析后为ExpansionPlanData
+  end_anchor?: string | null; // 结束锚点
   outline_id?: string; // 关联的大纲ID
   sub_index?: number; // 大纲下的子章节序号
   outline_title?: string; // 大纲标题（从后端联表查询获得）
@@ -450,6 +451,7 @@ export interface ChapterPlanItem {
     characters: string[];
     purpose: string;
   }>;
+  end_anchor?: string | null;
 }
 
 export interface OutlineExpansionRequest {
@@ -702,6 +704,7 @@ export interface AnalysisScores {
   engagement: number;
   coherence: number;
   overall: number;
+  anchor_compliance?: number;
 }
 
 // 完整分析数据 - 匹配后端PlotAnalysis模型
@@ -732,6 +735,7 @@ export interface AnalysisData {
   dialogue_ratio: number;
   description_ratio: number;
   created_at: string;
+  anchor_compliance_score?: number;
 }
 
 // 记忆片段
@@ -1228,6 +1232,44 @@ export interface AnnouncementStatusResponse {
   instance_id: string;
   cloud_url?: string;
   cloud_connected?: boolean;
+}
+
+// 项目健康检查
+export interface HealthIssueItem {
+  id: string;
+  title: string;
+}
+
+export interface ProjectHealth {
+  project_id: string;
+  outlines_missing_anchor: number;
+  outlines_missing_anchor_ids: HealthIssueItem[];
+  chapters_missing_analysis: number;
+  chapters_missing_analysis_ids: HealthIssueItem[];
+  chapters_stale_analysis: number;
+  chapters_stale_analysis_ids: HealthIssueItem[];
+  total_issues: number;
+}
+
+export interface FillAnchorResult {
+  id: string;
+  
+  skipped: boolean;
+  reason?: string;
+}
+
+export interface BatchFillAnchorsResult {
+  total: number;
+  succeeded: number;
+  failed: number;
+  skipped: number;
+  items: Array<{
+    id: string;
+    title: string;
+    status: 'ok' | 'failed' | 'skipped';
+    
+    reason?: string;
+  }>;
 }
 
 // 提示词工坊分类常量

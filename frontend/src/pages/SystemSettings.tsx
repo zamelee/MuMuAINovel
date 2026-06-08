@@ -91,6 +91,8 @@ export default function SystemSettingsPage() {
   const [announcementStatusFilter, setAnnouncementStatusFilter] = useState<AnnouncementStatusFilter>('all');
   const [announcementSearchKeyword, setAnnouncementSearchKeyword] = useState('');
   const [announcementPagination, setAnnouncementPagination] = useState({ current: 1, pageSize: 10, total: 0 });
+  const [securitySettings, setSecuritySettings] = useState<{ allow_private_api_url: boolean }>({ allow_private_api_url: false });
+  const [securitySaving, setSecuritySaving] = useState(false);
 
   const announcementContent = Form.useWatch('content', announcementForm) || '';
 
@@ -155,6 +157,7 @@ export default function SystemSettingsPage() {
       setCurrentUser(user);
       setAnnouncementStatus(status);
       form.setFieldsValue(smtpSettings);
+      // 安全设置改为在切换Tab时按需加载
     } catch (error) {
       console.error('加载系统设置失败:', error);
       message.error('加载系统设置失败');
@@ -211,6 +214,20 @@ export default function SystemSettingsPage() {
       setSaving(false);
     }
   };
+
+  const handleSecuritySave = async () => {
+    setSecuritySaving(true);
+    try {
+      await settingsApi.updateSystemSecuritySettings(securitySettings);
+      message.success("安全设置已保存");
+    } catch (error) {
+      console.error("保存安全设置失败:", error);
+      message.error("保存安全设置失败");
+    } finally {
+      setSecuritySaving(false);
+    }
+  };
+
 
   const handleTest = async () => {
     const toEmail = testTargetEmail.trim();
@@ -532,6 +549,14 @@ export default function SystemSettingsPage() {
 
       <Tabs
         defaultActiveKey="smtp"
+        onChange={async (key) => {
+          if (key === 'security') {
+            try {
+              const sec = await settingsApi.getSystemSecuritySettings();
+              setSecuritySettings(sec);
+            } catch {}
+          }
+        }}
         items={[
           {
             key: 'smtp',
@@ -657,7 +682,49 @@ export default function SystemSettingsPage() {
             ),
           },
           {
-            key: 'announcements',
+            key: 'security',
+            label: (
+              <Space>
+                <SettingOutlined />
+                安全设置
+              </Space>
+            ),
+            children: (
+              <Card title="API 安全配置" bordered={false} style={{ borderRadius: 16 }}>
+                <Alert
+                  type="warning"
+                  showIcon
+                  message="注意"
+                  description="启用后，用户可以使用私有IP/本地地址（如 192.168.x.x、localhost）作为大模型 API 的 Base URL。这通常用于连接本地部署的 Ollama、LocalAI 等服务。请仅在信任的网络环境中启用。"
+                  style={{ marginBottom: 16 }}
+                />
+                <Form layout="vertical">
+                  <Form.Item
+                    label="允许私有/本地 API 地址"
+                    extra="开启后，获取模型列表时将跳过对私有IP和内网地址的安全检查。"
+                  >
+                    <Switch
+                      checked={securitySettings.allow_private_api_url}
+                      onChange={(checked) => setSecuritySettings({ allow_private_api_url: checked })}
+                      checkedChildren="已允许"
+                      unCheckedChildren="已禁止"
+                    />
+                  </Form.Item>
+                  <Form.Item>
+                    <Button
+                      type="primary"
+                      icon={<SaveOutlined />}
+                      loading={securitySaving}
+                      onClick={handleSecuritySave}
+                    >
+                      保存设置
+                    </Button>
+                  </Form.Item>
+                </Form>
+              </Card>
+            ),
+          },
+          {
             label: (
               <Space>
                 <BellOutlined />

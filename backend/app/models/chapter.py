@@ -25,6 +25,9 @@ class Chapter(Base):
     # 大纲展开规划数据（JSON格式）
     expansion_plan = Column(Text, comment="展开规划详情(JSON): 包含key_events, character_focus, emotional_tone等")
     
+    # 结束锚点（每个章节的最后一个画面描述）
+    end_anchor = Column(Text, nullable=True, comment="结束锚点：本章最后一个画面描述")
+    
     created_at = Column(DateTime, server_default=func.now(), comment="创建时间")
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), comment="更新时间")
     

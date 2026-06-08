@@ -41,3 +41,5 @@ PyYAML==6.0.2
 
 # PyTorch 版本锁定（用于打包环境）
 torch==2.8.0
+
+jieba

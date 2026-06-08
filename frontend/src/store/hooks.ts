@@ -293,8 +293,11 @@ export function useChapterSync() {
   ) => {
     try {
       // 使用fetch处理流式响应
+      const abortController = new AbortController();
+      const signal = abortController.signal;
       const response = await fetch(`/api/chapters/${chapterId}/generate-stream`, {
         method: 'POST',
+        signal,
         headers: {
           'Content-Type': 'application/json',
         },
@@ -321,9 +324,15 @@ export function useChapterSync() {
       let buffer = '';
       let fullContent = '';
       let analysisTaskId: string | undefined;
+      let quickCheckResult: { anchor_score?: number | null; boundary_ok?: boolean; summary?: string } | null = null;
 
       while (true) {
         const { done, value } = await reader.read();
+
+        if (signal?.aborted) {
+          reader.cancel();
+          return { content: fullContent, analysis_task_id: undefined, aborted: true };
+        }
 
         if (done) {
           break;

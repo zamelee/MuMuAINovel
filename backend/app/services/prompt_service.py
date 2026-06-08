@@ -1,4 +1,5 @@
 """提示词管理服务"""
+from collections import defaultdict
 from typing import Dict, Any, Optional
 import json
 from app.services.skill_loader import get_all_skills_cached
@@ -615,6 +616,8 @@ class PromptService:
 ❌ 在结尾处使用开放式反问
 ❌ 添加作者注释或创作说明
 ❌ 角色行为超出其职业阶段的能力范围
+
+{end_anchor}
 </constraints>
 
 <output>
@@ -676,6 +679,8 @@ class PromptService:
 ❌ 使用"总之"、"综上所述"等AI常见总结语
 ❌ 添加作者注释或创作说明
 ❌ 生成字数禁止超过目标字数
+
+{end_anchor}
 </constraints>
 
 <output>
@@ -750,6 +755,8 @@ class PromptService:
 ❌ 添加作者注释或创作说明
 ❌ 重复上一章已发生的事件
 ❌ 生成字数禁止超过目标字数
+
+{end_anchor}
 </constraints>
 
 <output>
@@ -847,6 +854,8 @@ class PromptService:
 ❌ 重复叙述上一章已发生的事件（包括环境描写、心理活动）
 ❌ 在开篇使用"接上回"、"书接上文"等套话
 ❌ 角色行为超出其职业阶段的能力范围
+
+{end_anchor}
 </constraints>
 
 <output>
@@ -2614,7 +2623,7 @@ class PromptService:
             格式化后的提示词
         """
         try:
-            return template.format(**kwargs)
+            return template.format_map(defaultdict(str, kwargs))
         except KeyError as e:
             raise ValueError(f"缺少必需的参数: {e}")
     

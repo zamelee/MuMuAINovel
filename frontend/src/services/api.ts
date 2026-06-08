@@ -730,6 +730,18 @@ export const chapterApi = {
       chapter_ids: data?.chapter_ids && data.chapter_ids.length > 0 ? data.chapter_ids : undefined,
     }),
 
+  checkAnchor: (chapterId: string, data?: { strategy?: string; threshold?: number }) =>
+    api.post<unknown, { compliance_score?: number | null; violation?: string | null; suggestion?: string | null; message?: string }>(`/chapters/${chapterId}/check-anchor`, data || {}),
+
+  getAnchorScore: (chapterId: string) =>
+    api.get<{ anchor_compliance_score: number | null; has_analysis: boolean }>(`/chapters/${chapterId}/anchor-score`),
+
+  startAnalysis: (chapterId: string) =>
+    api.post<unknown, { message?: string }>(`/chapters/${chapterId}/start-analysis`),
+
+  fillAnchor: (chapterId: string) =>
+    api.post<unknown, { end_anchor?: string; message?: string }>(`/chapters/${chapterId}/fill-anchor`),
+
   // 章节重新生成相关
   getRegenerationTasks: (chapterId: string, limit?: number) =>
     api.get<unknown, {

@@ -89,10 +89,12 @@ def _calculate_generation_max_tokens(
     ai_service: Optional[AIService],
     extra_prompt_text: Optional[str] = None,
     minimum_tokens: int = 2000,
-    output_token_multiplier: float = 2.0,
-    prompt_char_token_ratio: float = 0.5,
+    output_token_multiplier: float = 1.5,
+    prompt_char_token_ratio: float = 1.5,
 ) -> int:
     """Estimate generation max_tokens while respecting the configured LLM ceiling."""
+    output_token_multiplier = max(0.5, min(10.0, output_token_multiplier))
+    prompt_char_token_ratio = max(0.5, min(10.0, prompt_char_token_ratio))
     base_output_tokens = int(target_word_count * output_token_multiplier)
     extra_prompt_chars = len(extra_prompt_text or "")
     extra_tokens = int(extra_prompt_chars * prompt_char_token_ratio)
@@ -178,6 +180,7 @@ async def get_project_chapters(
             "outline_id": chapter.outline_id,
             "sub_index": chapter.sub_index,
             "expansion_plan": chapter.expansion_plan,
+            "end_anchor": chapter.end_anchor,
             "created_at": chapter.created_at,
             "updated_at": chapter.updated_at,
         }
@@ -390,6 +393,7 @@ async def update_chapter(
         "outline_id": chapter.outline_id,
         "sub_index": chapter.sub_index,
         "expansion_plan": chapter.expansion_plan,
+        "end_anchor": chapter.end_anchor,
         "created_at": chapter.created_at,
         "updated_at": chapter.updated_at,
         "outline_title": None,
@@ -1009,6 +1013,20 @@ async def analyze_chapter_background(
             task.progress = 60
             await db_session.commit()
         
+
+        # === 锚点合规检测 ===
+        from app.services.plot_analyzer import validate_end_anchor
+        try:
+            raw_anchor = (getattr(chapter, 'end_anchor', None) or '').strip()
+            if raw_anchor and len(raw_anchor) >= 5:
+                anchor_result = validate_end_anchor(chapter.content, raw_anchor)
+                if anchor_result["compliance_score"] is not None:
+                    analysis_result["scores"]["anchor_compliance"] = anchor_result["compliance_score"]
+                if anchor_result["auto_suggestion"]:
+                    analysis_result["suggestions"].insert(0, anchor_result["auto_suggestion"])
+        except Exception:
+            pass  # 锚点检测失败不影响主流程
+
         # 4. 保存分析结果到数据库（写操作，需要锁）
         async with write_lock:
             existing_analysis_result = await db_session.execute(
@@ -1038,6 +1056,7 @@ async def analyze_chapter_background(
                 existing_analysis.pacing_score = analysis_result.get('scores', {}).get('pacing', 0)
                 existing_analysis.engagement_score = analysis_result.get('scores', {}).get('engagement', 0)
                 existing_analysis.coherence_score = analysis_result.get('scores', {}).get('coherence', 0)
+                existing_analysis.anchor_compliance_score = analysis_result.get('scores', {}).get('anchor_compliance')
                 existing_analysis.analysis_report = analyzer.generate_analysis_summary(analysis_result)
                 existing_analysis.suggestions = analysis_result.get('suggestions', [])
                 existing_analysis.dialogue_ratio = analysis_result.get('dialogue_ratio', 0)
@@ -1067,6 +1086,7 @@ async def analyze_chapter_background(
                     pacing_score=analysis_result.get('scores', {}).get('pacing', 0),
                     engagement_score=analysis_result.get('scores', {}).get('engagement', 0),
                     coherence_score=analysis_result.get('scores', {}).get('coherence', 0),
+                    anchor_compliance_score=analysis_result.get('scores', {}).get('anchor_compliance'),
                     analysis_report=analyzer.generate_analysis_summary(analysis_result),
                     suggestions=analysis_result.get('suggestions', []),
                     dialogue_ratio=analysis_result.get('dialogue_ratio', 0),
@@ -1561,6 +1581,7 @@ async def generate_chapter_content_stream(
                             chapter_number=current_chapter.chapter_number,
                             chapter_title=current_chapter.title,
                             chapter_outline=chapter_context.chapter_outline,
+                            end_anchor=chapter_context.end_anchor,
                             target_word_count=target_word_count,
                             genre=project.genre or '未设定',
                             narrative_perspective=chapter_perspective,
@@ -1581,6 +1602,7 @@ async def generate_chapter_content_stream(
                             chapter_number=current_chapter.chapter_number,
                             chapter_title=current_chapter.title,
                             chapter_outline=chapter_context.chapter_outline,
+                            end_anchor=chapter_context.end_anchor,
                             target_word_count=target_word_count,
                             genre=project.genre or '未设定',
                             narrative_perspective=chapter_perspective,
@@ -1608,6 +1630,7 @@ async def generate_chapter_content_stream(
                             chapter_number=current_chapter.chapter_number,
                             chapter_title=current_chapter.title,
                             chapter_outline=chapter_context.chapter_outline,
+                            end_anchor=chapter_context.end_anchor,
                             target_word_count=target_word_count,
                             continuation_point=chapter_context.continuation_point,
                             genre=project.genre or '未设定',
@@ -1630,6 +1653,7 @@ async def generate_chapter_content_stream(
                             chapter_number=current_chapter.chapter_number,
                             chapter_title=current_chapter.title,
                             chapter_outline=chapter_context.chapter_outline,
+                            end_anchor=chapter_context.end_anchor,
                             target_word_count=target_word_count,
                             genre=project.genre or '未设定',
                             narrative_perspective=chapter_perspective,
@@ -1697,6 +1721,7 @@ async def generate_chapter_content_stream(
                     ai_service=user_ai_service,
                     extra_prompt_text=system_prompt_with_style,
                     minimum_tokens=2000,
+                    output_token_multiplier=generate_request.char_token_ratio or 1.5,
                 )
                 logger.info(
                     f"📊 目标字数: {target_word_count}, 计算 max_tokens: {calculated_max_tokens}, "
@@ -1774,6 +1799,22 @@ async def generate_chapter_content_stream(
                 await db_session.refresh(current_chapter)
                 
                 logger.info(f"成功创作章节 {chapter_id}，共 {new_word_count} 字")
+
+                # === 截断检测 ===
+                try:
+                    from app.services.plot_analyzer import detect_truncation
+                    trunc_result = detect_truncation(new_chapter_content, target_word_count)
+                    if trunc_result["truncated"]:
+                        logger.warning(f"⚠️ 截断检测: {trunc_result['reason']}")
+                        yield {
+                            "type": "truncation_warning",
+                            "truncated": True,
+                            "reason": trunc_result["reason"],
+                            "word_count": trunc_result["word_count"]
+                        }
+                except Exception:
+                    pass
+
                 
                 # 🔮 章节生成后自动标记计划在本章埋入的伏笔
                 try:
@@ -1804,20 +1845,56 @@ async def generate_chapter_content_stream(
                 task_id = analysis_task.id
                 logger.info(f"📋 已创建分析任务: {task_id}")
                 
-                # 短暂延迟确保SQLite WAL完成写入
-                await asyncio.sleep(0.05)
-                
-                # 直接启动后台分析（并发执行）
-                background_tasks.add_task(
-                    analyze_chapter_background,
-                    chapter_id=chapter_id,
-                    user_id=current_user_id,
-                    project_id=project.id,
-                    task_id=task_id,
-                    ai_service=user_ai_service
-                )
+                # ✅ 分析任务已创建（状态pending），不再自动启动
+                # 倒计时由前端控制，调用 POST /api/chapters/{chapter_id}/start-analysis 启动
                 
                 yield await tracker.saving("章节保存完成", 0.8)
+                
+                # === 初步检测（本地算法，0 token 消耗） ===
+                quick_check = {"anchor_score": None, "boundary_ok": True, "summary": ""}
+                try:
+                    from app.services.plot_analyzer import validate_end_anchor, outline_boundary_check
+                    chapter_anchor = getattr(current_chapter, 'end_anchor', None)
+                    if chapter_anchor and chapter_anchor.strip():
+                        strategy = getattr(generate_request, "quick_check_strategy", "A+B") or "A+B"
+                        threshold = getattr(generate_request, "quick_check_threshold", 0.7) or 0.7
+                        anchor_result = validate_end_anchor(full_content, chapter_anchor.strip(), strategy, threshold)
+                        quick_check["anchor_score"] = anchor_result.get("compliance_score")
+                        if anchor_result.get("auto_suggestion"):
+                            quick_check["summary"] = anchor_result["auto_suggestion"][:200]
+                    
+                    # 大纲越界检测（如果存在下一条大纲）
+                    next_outline_content = None
+                    if outline and outline.content:
+                        try:
+                            next_result = await db_session.execute(
+                                select(Outline.content).where(
+                                    Outline.project_id == project.id,
+                                    Outline.order_index > (outline.order_index or 0)
+                                ).order_by(Outline.order_index.asc()).limit(1)
+                            )
+                            next_row = next_result.scalar_one_or_none()
+                            if next_row:
+                                next_outline_content = next_row
+                        except Exception:
+                            pass
+                    if next_outline_content:
+                        boundary_result = outline_boundary_check(full_content, next_outline_content, threshold)
+                        quick_check["boundary_ok"] = boundary_result.get("boundary_ok", True)
+                        if boundary_result.get("suggestion"):
+                            if quick_check["summary"]:
+                                quick_check["summary"] += " | " + boundary_result["suggestion"][:100]
+                            else:
+                                quick_check["summary"] = boundary_result["suggestion"][:100]
+                    
+                    logger.info(f"🔍 初步检测完成: anchor={quick_check['anchor_score']}, boundary_ok={quick_check['boundary_ok']}")
+                except Exception as qc_err:
+                    logger.warning(f"⚠️ 初步检测失败（不阻断生成）: {qc_err}")
+                
+                yield await SSEResponse.send_event(
+                    event='quick_check',
+                    data=quick_check
+                )
                 
                 # === 完成阶段 ===
                 yield await tracker.complete("创作完成！")
@@ -1825,15 +1902,16 @@ async def generate_chapter_content_stream(
                 # 发送结果数据
                 yield await tracker.result({
                     'word_count': new_word_count,
-                    'analysis_task_id': task_id
+                    'analysis_task_id': task_id,
+                    'quick_check': quick_check
                 })
                 
-                # 发送分析开始事件（使用自定义事件）
+                # 发送分析排队事件（分析任务已创建，等待前端倒计时触发）
                 yield await SSEResponse.send_event(
-                    event='analysis_started',
+                    event='analysis_queued',
                     data={
                         'task_id': task_id,
-                        'message': '章节分析已开始'
+                        'message': '分析任务已创建，等待启动'
                     }
                 )
                 
@@ -2099,6 +2177,7 @@ async def _run_chapter_generation_bg(
                 chapter_number=current_chapter.chapter_number,
                 chapter_title=current_chapter.title,
                 chapter_outline=chapter_context.chapter_outline,
+                            end_anchor=chapter_context.end_anchor,
                 target_word_count=target_word_count,
                 genre=project.genre or '未设定',
                 narrative_perspective=chapter_perspective,
@@ -2117,6 +2196,7 @@ async def _run_chapter_generation_bg(
                 chapter_number=current_chapter.chapter_number,
                 chapter_title=current_chapter.title,
                 chapter_outline=chapter_context.chapter_outline,
+                            end_anchor=chapter_context.end_anchor,
                 target_word_count=target_word_count,
                 genre=project.genre or '未设定',
                 narrative_perspective=chapter_perspective,
@@ -2135,6 +2215,7 @@ async def _run_chapter_generation_bg(
                 chapter_number=current_chapter.chapter_number,
                 chapter_title=current_chapter.title,
                 chapter_outline=chapter_context.chapter_outline,
+                            end_anchor=chapter_context.end_anchor,
                 target_word_count=target_word_count,
                 continuation_point=chapter_context.continuation_point,
                 genre=project.genre or '未设定',
@@ -2154,6 +2235,7 @@ async def _run_chapter_generation_bg(
                 chapter_number=current_chapter.chapter_number,
                 chapter_title=current_chapter.title,
                 chapter_outline=chapter_context.chapter_outline,
+                            end_anchor=chapter_context.end_anchor,
                 target_word_count=target_word_count,
                 genre=project.genre or '未设定',
                 narrative_perspective=chapter_perspective,
@@ -2186,6 +2268,7 @@ async def _run_chapter_generation_bg(
         ai_service=user_ai_service,
         extra_prompt_text=system_prompt_with_style,
         minimum_tokens=2000,
+        output_token_multiplier=task_input.get("char_token_ratio", 1.5),
     )
 
     generate_kwargs = {
@@ -2585,6 +2668,7 @@ async def _run_chapter_generation_bg(
                 chapter_number=current_chapter.chapter_number,
                 chapter_title=current_chapter.title,
                 chapter_outline=chapter_context.chapter_outline,
+                            end_anchor=chapter_context.end_anchor,
                 target_word_count=target_word_count,
                 genre=project.genre or '未设定',
                 narrative_perspective=chapter_perspective,
@@ -2603,6 +2687,7 @@ async def _run_chapter_generation_bg(
                 chapter_number=current_chapter.chapter_number,
                 chapter_title=current_chapter.title,
                 chapter_outline=chapter_context.chapter_outline,
+                            end_anchor=chapter_context.end_anchor,
                 target_word_count=target_word_count,
                 genre=project.genre or '未设定',
                 narrative_perspective=chapter_perspective,
@@ -2621,6 +2706,7 @@ async def _run_chapter_generation_bg(
                 chapter_number=current_chapter.chapter_number,
                 chapter_title=current_chapter.title,
                 chapter_outline=chapter_context.chapter_outline,
+                            end_anchor=chapter_context.end_anchor,
                 target_word_count=target_word_count,
                 continuation_point=chapter_context.continuation_point,
                 genre=project.genre or '未设定',
@@ -2640,6 +2726,7 @@ async def _run_chapter_generation_bg(
                 chapter_number=current_chapter.chapter_number,
                 chapter_title=current_chapter.title,
                 chapter_outline=chapter_context.chapter_outline,
+                            end_anchor=chapter_context.end_anchor,
                 target_word_count=target_word_count,
                 genre=project.genre or '未设定',
                 narrative_perspective=chapter_perspective,
@@ -2672,6 +2759,7 @@ async def _run_chapter_generation_bg(
         ai_service=user_ai_service,
         extra_prompt_text=system_prompt_with_style,
         minimum_tokens=2000,
+        output_token_multiplier=task_input.get("char_token_ratio", 1.5),
     )
 
     generate_kwargs = {
@@ -3156,6 +3244,57 @@ async def batch_analyze_unanalyzed_chapters(
         "total_already_completed": total_already_completed,
         "started_tasks": started_tasks
     }
+
+
+
+
+
+@router.post("/{chapter_id}/start-analysis", summary="手动/倒计时触发章节分析")
+async def start_chapter_analysis(
+    chapter_id: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    # user_id from request state (consistent with rest of codebase)
+):
+    """启动已创建的pending分析任务（由前端倒计时或手动触发）"""
+    from app.database import get_db_write_lock
+    user_id = getattr(request.state, "user_id", "system")
+
+    # 查找pending任务
+    result = await db.execute(
+        select(AnalysisTask).where(
+            AnalysisTask.chapter_id == chapter_id,
+            AnalysisTask.status == "pending"
+        ).order_by(AnalysisTask.created_at.desc()).limit(1)
+    )
+    task = result.scalar_one_or_none()
+
+    if not task:
+        return {"started": False, "message": "没有待处理的分析任务"}
+
+    # 获取AI服务
+    user_ai_service = await get_user_ai_service_from_db_by_usage(
+        user_id=user_id,
+        db=db,
+        usage="chapter_analysis"
+    )
+
+    if not user_ai_service:
+        raise HTTPException(status_code=400, detail="请先配置章节内容分析API")
+
+    # 启动后台分析（background_tasks 由 FastAPI 依赖注入）
+    background_tasks.add_task(
+        analyze_chapter_background,
+        chapter_id=chapter_id,
+        user_id=user_id,
+        project_id=task.project_id,
+        task_id=task.id,
+        ai_service=user_ai_service
+    )
+
+    logger.info(f"🚀 手动启动分析: chapter={chapter_id}, task={task.id}")
+    return {"started": True, "task_id": task.id, "message": "分析已启动"}
 
 
 @router.get("/{chapter_id}/analysis", summary="获取章节分析结果")
@@ -4112,6 +4251,7 @@ async def generate_single_chapter_for_batch(
                 chapter_number=chapter.chapter_number,
                 chapter_title=chapter.title,
                 chapter_outline=chapter_context.chapter_outline,
+                            end_anchor=chapter_context.end_anchor,
                 target_word_count=target_word_count,
                 genre=project.genre or '未设定',
                 narrative_perspective=project.narrative_perspective or '第三人称',
@@ -4131,6 +4271,7 @@ async def generate_single_chapter_for_batch(
                 chapter_number=chapter.chapter_number,
                 chapter_title=chapter.title,
                 chapter_outline=chapter_context.chapter_outline,
+                            end_anchor=chapter_context.end_anchor,
                 target_word_count=target_word_count,
                 genre=project.genre or '未设定',
                 narrative_perspective=project.narrative_perspective or '第三人称',
@@ -4158,6 +4299,7 @@ async def generate_single_chapter_for_batch(
                 chapter_number=chapter.chapter_number,
                 chapter_title=chapter.title,
                 chapter_outline=chapter_context.chapter_outline,
+                            end_anchor=chapter_context.end_anchor,
                 target_word_count=target_word_count,
                 continuation_point=chapter_context.continuation_point,
                 genre=project.genre or '未设定',
@@ -4178,6 +4320,7 @@ async def generate_single_chapter_for_batch(
                 chapter_number=chapter.chapter_number,
                 chapter_title=chapter.title,
                 chapter_outline=chapter_context.chapter_outline,
+                            end_anchor=chapter_context.end_anchor,
                 target_word_count=target_word_count,
                 genre=project.genre or '未设定',
                 narrative_perspective=project.narrative_perspective or '第三人称',
@@ -4239,6 +4382,7 @@ async def generate_single_chapter_for_batch(
         ai_service=user_ai_service,
         extra_prompt_text=system_prompt_with_style,
         minimum_tokens=2000,
+        output_token_multiplier=task_input.get("char_token_ratio", 1.5),
     )
     logger.info(
         f"📊 批量生成 - 目标字数: {target_word_count}, 计算 max_tokens: {calculated_max_tokens}, "
@@ -4987,7 +5131,7 @@ async def partial_regenerate_stream(
                 ai_service=user_ai_service,
                 extra_prompt_text=prompt,
                 minimum_tokens=500,
-                output_token_multiplier=3.0,
+                output_token_multiplier=1.5,
             )
             
             # 流式生成
@@ -5140,3 +5284,277 @@ async def apply_partial_regenerate(
         "message": "局部重写已应用"
     }
 
+
+
+
+# ==================== 锚点补全（章节级别） ====================
+
+@router.post("/{chapter_id}/check-anchor", summary="手动检测锚点合规度")
+async def check_chapter_anchor(
+    chapter_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db)
+):
+    """手动触发锚点合规检测（本地算法，0 token 消耗）"""
+    try:
+        result = await db.execute(
+            select(Chapter).where(Chapter.id == chapter_id)
+        )
+        chapter = result.scalar_one_or_none()
+        if not chapter:
+            raise HTTPException(status_code=404, detail="章节不存在")
+
+        if not chapter.content:
+            return {"compliance_score": None, "message": "章节无内容"}
+
+        end_anchor = getattr(chapter, "end_anchor", None)
+        if not end_anchor or not end_anchor.strip():
+            return {"compliance_score": None, "message": "未设置结束锚点，请先填写或AI提取"}
+
+        strategy = "A+B"
+        threshold = 0.7
+        try:
+            body = await request.json()
+            if body:
+                strategy = body.get("strategy", "A+B") or "A+B"
+                threshold = float(body.get("threshold", 0.7) or 0.7)
+        except Exception:
+            pass
+
+        from app.services.plot_analyzer import validate_end_anchor
+        anchor_result = validate_end_anchor(chapter.content, end_anchor.strip(), strategy, threshold)
+
+        compliance_score = anchor_result.get("compliance_score")
+        logger.info(f"🔍 手动锚点检测完成: score={compliance_score}")
+
+        # 持久化到 PlotAnalysis 表，与完整分析走同一存储路径
+        if compliance_score is not None:
+            from app.models.memory import PlotAnalysis
+            analysis_result = await db.execute(
+                select(PlotAnalysis).where(PlotAnalysis.chapter_id == chapter_id)
+            )
+            existing = analysis_result.scalar_one_or_none()
+            if existing:
+                existing.anchor_compliance_score = compliance_score
+                await db.commit()
+            else:
+                new_analysis = PlotAnalysis(chapter_id=chapter_id, project_id=chapter.project_id,
+                    anchor_compliance_score=compliance_score)
+                db.add(new_analysis)
+                await db.commit()
+
+        return {
+            "compliance_score": compliance_score,
+            "violation": anchor_result.get("violation"),
+            "suggestion": anchor_result.get("auto_suggestion"),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"手动锚点检测失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"检测失败: {str(e)}")
+
+@router.get("/{chapter_id}/anchor-score", summary="获取章节锚点合规分数")
+async def get_chapter_anchor_score(
+    chapter_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db)
+):
+    """读取已持久化的锚点合规分数（不重新计算，0 token 消耗）"""
+    try:
+        from app.models.memory import PlotAnalysis
+        result = await db.execute(
+            select(PlotAnalysis).where(PlotAnalysis.chapter_id == chapter_id)
+        )
+        analysis = result.scalar_one_or_none()
+        return {
+            "anchor_compliance_score": analysis.anchor_compliance_score if analysis else None,
+            "has_analysis": analysis is not None,
+        }
+    except Exception as e:
+        logger.error(f"获取锚点分数失败: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"获取失败: {str(e)}")
+
+
+@router.post("/{chapter_id}/fill-anchor", summary="AI补全章节锚点")
+async def fill_chapter_anchor(
+    chapter_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db)
+):
+    """用AI根据章节大纲内容自动生成结束锚点"""
+    try:
+        result = await db.execute(
+            select(Chapter).where(Chapter.id == chapter_id)
+        )
+        chapter = result.scalar_one_or_none()
+        if not chapter:
+            raise HTTPException(status_code=404, detail="章节不存在")
+
+        # 已有锚点则跳过
+        if chapter.end_anchor and chapter.end_anchor.strip():
+            return {"id": chapter_id, "end_anchor": chapter.end_anchor, "skipped": True, "reason": "已存在"}
+
+        # 构建生成内容：优先用 expansion_plan，其次用 summary
+        source_content = ""
+        if chapter.expansion_plan:
+            try:
+                plan = json.loads(chapter.expansion_plan)
+                source_content = plan.get("plot_summary", "") or chapter.summary or ""
+            except json.JSONDecodeError:
+                source_content = chapter.summary or ""
+        else:
+            source_content = chapter.summary or ""
+
+        if len(source_content) < 20:
+            return {"id": chapter_id, "end_anchor": None, "skipped": True, "reason": "内容过短（<20字），请手动填写"}
+
+        # 使用用户配置的AI服务（章节分析API）
+        user_id = getattr(request.state, "user_id", None)
+        ai_service = await get_user_ai_service_from_db_by_usage(user_id, db, usage="chapter_analysis")
+        prompt = (
+            f"请根据以下章节大纲内容，提取最后一个关键事件或场景，用一句具体画面描述作为\"结束锚点\"。\n"
+            f"要求：1) 描述具体可感知的画面（包含动作、场景、感官细节）\n"
+            f"2) 不超过50字\n"
+            f"3) 直接返回描述文本，不要任何前缀或说明\n"
+            f"4) 【重要】不要使用<think>标签，直接输出纯文本\n\n"
+            f"章节大纲：\n{source_content[:800]}"
+        )
+        result_ai = await ai_service.generate_text(
+            prompt=prompt,
+            max_tokens=200,
+            temperature=0.3,
+            auto_mcp=False,
+        )
+        anchor_text = (result_ai.get("content") or "").strip()
+        import re
+        # 清理 think 标签
+        anchor_text = re.sub(r"<\s*think[\s>].*?<\s*/\s*think\s*>", "", anchor_text, flags=re.DOTALL | re.IGNORECASE)
+        anchor_text = re.sub(r"<\s*think\s*>.*?<\s*/\s*think\s*>", "", anchor_text, flags=re.DOTALL | re.IGNORECASE)
+        anchor_text = anchor_text.strip()
+        anchor_text = anchor_text.replace('"', "").replace('"', "").replace('"', "").replace("「", "").replace("」", "")
+        anchor_text = anchor_text.replace("结束锚点：", "").replace("锚点：", "").replace("描述：", "").strip()
+
+        if len(anchor_text) < 5:
+            return {"id": chapter_id, "end_anchor": None, "skipped": True, "reason": "AI生成结果过短"}
+
+        # 保存
+        chapter.end_anchor = anchor_text
+        await db.commit()
+
+        return {"id": chapter_id, "end_anchor": anchor_text, "skipped": False}
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"补全章节锚点失败 {chapter_id}: {str(e)}", exc_info=True)
+        await db.rollback()
+        raise HTTPException(status_code=500, detail=f"补全失败: {str(e)}")
+
+
+@router.post("/project/{project_id}/fill-anchors", summary="批量AI补全章节锚点")
+async def batch_fill_chapter_anchors(
+    project_id: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+    delay_ms: int = 1000
+):
+    """批量补全项目中所有缺失锚点的章节（串行，错误隔离）"""
+    try:
+        import re
+
+        # 查找所有缺失锚点的章节
+        result = await db.execute(
+            select(Chapter.id, Chapter.title, Chapter.summary, Chapter.expansion_plan).where(
+                Chapter.project_id == project_id,
+                (Chapter.end_anchor == None) | (Chapter.end_anchor == "")
+            )
+        )
+        missing = [
+            {"id": row[0], "title": row[1], "summary": row[2], "expansion_plan": row[3]}
+            for row in result
+        ]
+
+        if not missing:
+            return {"total": 0, "succeeded": 0, "failed": 0, "skipped": 0, "items": []}
+
+        user_id = getattr(request.state, "user_id", None)
+        ai_service = await get_user_ai_service_from_db_by_usage(user_id, db, usage="chapter_analysis")
+
+        items = []
+        succeeded = 0
+        failed = 0
+        skipped = 0
+
+        for chapter_item in missing:
+            try:
+                # 构建生成内容
+                source = ""
+                if chapter_item["expansion_plan"]:
+                    try:
+                        plan = json.loads(chapter_item["expansion_plan"])
+                        source = plan.get("plot_summary", "") or chapter_item["summary"] or ""
+                    except json.JSONDecodeError:
+                        source = chapter_item["summary"] or ""
+                else:
+                    source = chapter_item["summary"] or ""
+
+                if len(source) < 20:
+                    items.append({"id": chapter_item["id"], "title": chapter_item["title"], "status": "skipped", "reason": "内容过短"})
+                    skipped += 1
+                    continue
+
+                prompt = (
+                    f"请根据以下章节大纲内容，提取最后一个关键事件或场景，用一句具体画面描述作为\"结束锚点\"。\n"
+                    f"要求：1) 描述具体可感知的画面（包含动作、场景、感官细节）\n"
+                    f"2) 不超过50字\n"
+                    f"3) 直接返回描述文本，不要任何前缀或说明\n"
+                    f"4) 【重要】不要使用<think>标签，直接输出纯文本\n\n"
+                    f"章节大纲：\n{source[:800]}"
+                )
+                result_ai = await ai_service.generate_text(
+                    prompt=prompt,
+                    max_tokens=200,
+                    temperature=0.3,
+                    auto_mcp=False,
+                )
+                anchor_text = (result_ai.get("content") or "").strip()
+                anchor_text = re.sub(r"<\s*think[\s>].*?<\s*/\s*think\s*>", "", anchor_text, flags=re.DOTALL | re.IGNORECASE)
+                anchor_text = anchor_text.strip()
+                anchor_text = anchor_text.replace('"', "").replace('"', "").replace('"', "").replace("「", "").replace("」", "")
+                anchor_text = anchor_text.replace("结束锚点：", "").replace("锚点：", "").replace("描述：", "").strip()
+
+                if len(anchor_text) < 5:
+                    items.append({"id": chapter_item["id"], "title": chapter_item["title"], "status": "failed", "reason": "AI生成结果过短"})
+                    failed += 1
+                    continue
+
+                update_result = await db.execute(select(Chapter).where(Chapter.id == chapter_item["id"]))
+                chapter_obj = update_result.scalar_one_or_none()
+                if chapter_obj:
+                    if chapter_obj.end_anchor and chapter_obj.end_anchor.strip():
+                        items.append({"id": chapter_item["id"], "title": chapter_item["title"], "status": "skipped", "reason": "已存在"})
+                        skipped += 1
+                    else:
+                        chapter_obj.end_anchor = anchor_text
+                        await db.commit()
+                        items.append({"id": chapter_item["id"], "title": chapter_item["title"], "status": "ok", "end_anchor": anchor_text})
+                        succeeded += 1
+            except Exception as e:
+                await db.rollback()
+                items.append({"id": chapter_item["id"], "title": chapter_item["title"], "status": "failed", "reason": str(e)[:100]})
+                failed += 1
+
+            await asyncio.sleep(delay_ms / 1000.0)
+
+        return {
+            "total": len(missing),
+            "succeeded": succeeded,
+            "failed": failed,
+            "skipped": skipped,
+            "items": items,
+        }
+
+    except Exception as e:
+        logger.error(f"批量补全章节锚点失败: {str(e)}", exc_info=True)
+        raise HTTPException(status_code=500, detail=f"批量补全失败: {str(e)}")

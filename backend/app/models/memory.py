@@ -87,7 +87,7 @@ class PlotAnalysis(Base):
     
     # 剧情结构分析
     plot_stage = Column(String(50), comment="剧情阶段: 开端/发展/高潮/结局/过渡")
-    conflict_level = Column(Integer, comment="冲突强度 1-10")
+    conflict_level = Column(Float, comment="冲突强度 1-10")
     conflict_types = Column(JSON, comment="冲突类型列表: ['人与人', '人与己', '人与环境']")
     
     # 情感分析
@@ -153,6 +153,7 @@ class PlotAnalysis(Base):
     pacing_score = Column(Float, comment="节奏评分 0.0-10.0")
     engagement_score = Column(Float, comment="吸引力评分 0.0-10.0")
     coherence_score = Column(Float, comment="连贯性评分 0.0-10.0")
+    anchor_compliance_score = Column(Float, nullable=True, comment="锚点合规评分 0.0-10.0，无锚点时为null")
     
     # 文本分析报告
     analysis_report = Column(Text, comment="完整的文字分析报告")
@@ -192,6 +193,7 @@ class PlotAnalysis(Base):
             "pacing_score": self.pacing_score or 0.0,
             "engagement_score": self.engagement_score or 0.0,
             "coherence_score": self.coherence_score or 0.0,
+            "anchor_compliance_score": self.anchor_compliance_score,
             "analysis_report": self.analysis_report,
             "suggestions": self.suggestions or [],
             "dialogue_ratio": self.dialogue_ratio or 0.0,

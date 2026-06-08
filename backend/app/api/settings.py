@@ -20,7 +20,8 @@ from app.schemas.settings import (
     APIKeyPreset, APIKeyPresetConfig, PresetCreateRequest,
     PresetUpdateRequest, PresetResponse, PresetListResponse,
     ChapterAnalysisPresetSelectionRequest,
-    SystemSMTPSettingsResponse, SystemSMTPSettingsUpdate, SMTPTestRequest
+    SystemSMTPSettingsResponse, SystemSMTPSettingsUpdate, SMTPTestRequest,
+    SystemSecuritySettings
 )
 from app.user_manager import User
 from app.logger import get_logger, safe_preview
@@ -497,6 +498,31 @@ async def test_system_smtp_settings(
     }
 
 
+
+@router.get("/system/security")
+async def get_system_security_settings(
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """获取系统安全设置（仅管理员）"""
+    settings = await get_or_create_admin_settings(db, user)
+    return {"allow_private_api_url": settings.allow_private_api_url}
+
+
+@router.put("/system/security")
+async def update_system_security_settings(
+    data: SystemSecuritySettings,
+    user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_db)
+):
+    """更新系统安全设置（仅管理员）"""
+    settings = await get_or_create_admin_settings(db, user)
+    settings.allow_private_api_url = data.allow_private_api_url
+    await db.commit()
+    await db.refresh(settings)
+    logger.info(f"管理员 {user.user_id} 更新安全设置: allow_private_api_url={data.allow_private_api_url}")
+    return {"allow_private_api_url": settings.allow_private_api_url}
+
 @router.post("", response_model=SettingsResponse)
 async def save_settings(
     data: SettingsCreate,
@@ -630,7 +656,8 @@ async def get_available_models(
     api_key: Optional[str] = "",
     api_base_url: Optional[str] = "",
     provider: str = "openai",
-    user: User = Depends(require_login)
+    user: User = Depends(require_login),
+    db: AsyncSession = Depends(get_db)
 ):
     """
     从配置的 API 获取可用的模型列表
@@ -648,7 +675,13 @@ async def get_available_models(
         resolved_config = resolve_runtime_ai_config(raw_provider, api_key, api_base_url)
         provider = resolved_config["api_provider"]
         api_key = resolved_config["api_key"]
-        api_base_url = validate_public_http_url(resolved_config["api_base_url"])
+        # 检查系统安全设置：是否允许私有/本地API地址
+        _result = await db.execute(
+        select(Settings).where(Settings.allow_private_api_url == True)
+        )
+        _security_row = _result.scalar_one_or_none()
+        _skip_check = bool(_security_row)
+        api_base_url = validate_public_http_url(resolved_config["api_base_url"], skip_private_check=_skip_check)
         async with httpx.AsyncClient(timeout=10.0) as client:
             if provider == "openai" or provider == "azure" or provider == "custom":
                 # OpenAI 兼容接口获取模型列表

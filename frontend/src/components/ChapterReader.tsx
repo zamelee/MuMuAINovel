@@ -28,7 +28,7 @@ import {
   TeamOutlined,
   OrderedListOutlined,
 } from '@ant-design/icons';
-import type { Chapter, ExpansionPlanData } from '../types';
+import type { Chapter, ExpansionPlanData, AnalysisData } from '../types';
 
 interface ReaderSettings {
   fontSize: number;
@@ -135,6 +135,7 @@ export default function ChapterReader({
   const [leftDrawerOpen, setLeftDrawerOpen] = useState(false);
   const [rightDrawerOpen, setRightDrawerOpen] = useState(false);
   const [viewportWidth, setViewportWidth] = useState(window.innerWidth);
+  const [analysisData, setAnalysisData] = useState<AnalysisData | null>(null);
 
   const isMobile = viewportWidth <= 900;
 
@@ -147,6 +148,7 @@ export default function ChapterReader({
   useEffect(() => {
     if (!visible || !chapter?.id) return;
 
+    setAnalysisData(null);
     const controller = new AbortController();
     setLoading(true);
 
@@ -164,6 +166,19 @@ export default function ChapterReader({
         message.error('获取章节导航信息失败');
       })
       .finally(() => setLoading(false));
+
+    // 获取分析数据
+    fetch(`/api/chapters/${chapter.id}/analysis`, { signal: controller.signal })
+      .then(res => {
+        if (!res.ok) return null;
+        return res.json();
+      })
+      .then(data => {
+        if (data) setAnalysisData(data.analysis || data);
+      })
+      .catch(err => {
+        if (err.name === 'AbortError') return;
+      });
 
     return () => controller.abort();
   }, [visible, chapter?.id]);
@@ -291,7 +306,7 @@ export default function ChapterReader({
 
   const renderContextPanel = () => (
     <div style={{ height: '100%', overflowY: 'auto', padding: 16 }}>
-      <SectionTitle icon={<ProfileOutlined />} title="三章主干" />
+      <SectionTitle icon={<ProfileOutlined />} title="前后章节预览" />
       <Spin spinning={contextLoading}>
         <ChapterBrief
           label="上一章"
@@ -299,15 +314,8 @@ export default function ChapterReader({
           plan={parsePlan(contextChapters.previous)}
           emptyText="暂无上一章"
           currentTheme={currentTheme}
+          showEndAnchor
           muted
-        />
-        <ChapterBrief
-          label="本章"
-          chapter={contextChapters.current}
-          plan={currentPlan}
-          emptyText="暂无本章"
-          currentTheme={currentTheme}
-          active
         />
         <ChapterBrief
           label="下一章"
@@ -329,6 +337,7 @@ export default function ChapterReader({
         plan={currentPlan}
         wordProgress={wordProgress}
         currentTheme={currentTheme}
+        analysis={analysisData}
       />
     </div>
   );
@@ -410,12 +419,12 @@ export default function ChapterReader({
         <Space size={8}>
           {isMobile && (
             <>
-              <Tooltip title="三章主干">
+              <Tooltip title="前后章节预览">
                 <Button
                   size="small"
                   icon={<ProfileOutlined />}
                   onClick={() => setLeftDrawerOpen(true)}
-                  aria-label="三章主干"
+                  aria-label="前后章节预览"
                 />
               </Tooltip>
               <Tooltip title="本章验收">
@@ -639,7 +648,7 @@ export default function ChapterReader({
       </div>
 
       <Drawer
-        title="三章主干"
+        title="前后章节预览"
         placement="left"
         width="88%"
         open={leftDrawerOpen}
@@ -680,6 +689,7 @@ function ChapterBrief({
   currentTheme,
   active,
   muted,
+  showEndAnchor,
 }: {
   label: string;
   chapter: Chapter | null;
@@ -687,6 +697,7 @@ function ChapterBrief({
   emptyText: string;
   currentTheme: ReaderThemeStyle;
   active?: boolean;
+  showEndAnchor?: boolean;
   muted?: boolean;
 }) {
   if (!chapter) {
@@ -700,6 +711,11 @@ function ChapterBrief({
         opacity: 0.55,
       }}>
         {emptyText}
+        {showEndAnchor && chapter?.end_anchor && (
+          <div style={{ marginTop: 8, fontSize: 12, color: "#1677ff", lineHeight: 1.5 }}>
+            🔚 {chapter.end_anchor}
+          </div>
+        )}
       </div>
     );
   }
@@ -736,7 +752,7 @@ function ChapterBrief({
               opacity: 0.78,
               marginTop: 4,
             }}>
-              <span>{index + 1}.</span>
+              <span style={{ fontWeight: 700 }}>{index + 1}.</span>
               <span>{event}</span>
             </div>
           ))}
@@ -745,6 +761,11 @@ function ChapterBrief({
               还有 {keyEvents.length - 3} 个关键事件
             </div>
           )}
+        </div>
+      )}
+      {showEndAnchor && chapter.end_anchor && (
+        <div style={{ marginTop: 8, fontSize: 12, color: "#1677ff", lineHeight: 1.5 }}>
+          🔚 {chapter.end_anchor}
         </div>
       )}
     </div>
@@ -756,11 +777,13 @@ function PlanPanel({
   plan,
   wordProgress,
   currentTheme,
+  analysis,
 }: {
   chapter: Chapter;
   plan: PlanData | null;
   wordProgress: number | null;
   currentTheme: ReaderThemeStyle;
+  analysis?: AnalysisData | null;
 }) {
   if (!plan && !chapter.summary) {
     return <Empty description="暂无本章规划" style={{ paddingTop: 48 }} />;
@@ -769,9 +792,43 @@ function PlanPanel({
   const keyEvents = plan?.key_events || [];
   const characters = plan?.character_focus || [];
   const scenes = plan?.scenes || [];
+  const scores = analysis ? {
+    overall: analysis.overall_quality_score,
+    pacing: analysis.pacing_score,
+    engagement: analysis.engagement_score,
+    coherence: analysis.coherence_score,
+    anchor: analysis.anchor_compliance_score,
+  } : null;
+
+  const scoreColor = (v?: number) => {
+    if (v == null) return '#888';
+    if (v >= 7) return '#52c41a';
+    if (v >= 5) return '#faad14';
+    return '#ff4d4f';
+  };
 
   return (
-    <Space direction="vertical" size={12} style={{ width: '100%' }}>
+    <Space direction="vertical" size={6} style={{ width: '100%' }}>
+      {/* 分析评分 - 紧凑一行 */}
+      {scores && (
+        <div style={{
+          display: 'flex',
+          flexWrap: 'wrap',
+          gap: '2px 10px',
+          padding: '6px 10px',
+          borderRadius: 6,
+          border: '1px solid ' + currentTheme.border,
+          background: currentTheme.mutedBg,
+          fontSize: 12,
+        }}>
+          {scores.overall != null && <span>总评 <b style={{color: scoreColor(scores.overall)}}>{scores.overall}</b></span>}
+          {scores.pacing != null && <span>节奏 <b style={{color: scoreColor(scores.pacing)}}>{scores.pacing}</b></span>}
+          {scores.engagement != null && <span>吸引 <b style={{color: scoreColor(scores.engagement)}}>{scores.engagement}</b></span>}
+          {scores.coherence != null && <span>连贯 <b style={{color: scoreColor(scores.coherence)}}>{scores.coherence}</b></span>}
+          {scores.anchor != null && <span>锚点 <b style={{color: scoreColor(scores.anchor)}}>{scores.anchor}</b></span>}
+        </div>
+      )}
+
       <InfoBlock title="本章主干" currentTheme={currentTheme}>
         <div style={{ lineHeight: 1.7 }}>
           {compactText(chapter.summary || plan?.narrative_goal)}
@@ -785,10 +842,10 @@ function PlanPanel({
       )}
 
       <InfoBlock title="字数控制" currentTheme={currentTheme}>
-        <Space direction="vertical" size={8} style={{ width: '100%' }}>
+        <Space direction="vertical" size={4} style={{ width: '100%' }}>
           <div>
             实际 {chapter.word_count || 0} 字
-            {plan?.estimated_words ? ` / 预计 ${plan.estimated_words} 字` : ''}
+            {plan?.estimated_words ? ' / 预计 ' + plan.estimated_words + ' 字' : ''}
           </div>
           {wordProgress !== null && (
             <Progress
@@ -803,7 +860,7 @@ function PlanPanel({
 
       {keyEvents.length > 0 && (
         <InfoBlock title="关键事件" icon={<OrderedListOutlined />} currentTheme={currentTheme}>
-          <Space direction="vertical" size={8} style={{ width: '100%' }}>
+          <Space direction="vertical" size={4} style={{ width: '100%' }}>
             {keyEvents.map((event, index) => (
               <div key={index} style={{ display: 'flex', gap: 8, lineHeight: 1.6 }}>
                 <Tag color="purple" style={{ margin: 0 }}>#{index + 1}</Tag>
@@ -814,11 +871,30 @@ function PlanPanel({
         </InfoBlock>
       )}
 
+      {/* 结束锚点 */}
+      {chapter.end_anchor ? (
+        <InfoBlock title="结束锚点" icon={<span>🔚</span>} currentTheme={currentTheme}>
+          <div style={{ fontSize: 12, color: '#1677ff', lineHeight: 1.6 }}>
+            {chapter.end_anchor}
+          </div>
+        </InfoBlock>
+      ) : (
+        <div style={{
+          padding: '6px 10px',
+          borderRadius: 6,
+          border: '1px dashed ' + currentTheme.border,
+          fontSize: 12,
+          opacity: 0.65,
+        }}>
+          🔚 结束锚点（未设置）
+        </div>
+      )}
+
       {(characters.length > 0 || plan?.emotional_tone || plan?.conflict_type) && (
         <InfoBlock title="控制要点" icon={<TeamOutlined />} currentTheme={currentTheme}>
-          <Space direction="vertical" size={10} style={{ width: '100%' }}>
+          <Space direction="vertical" size={6} style={{ width: '100%' }}>
             {characters.length > 0 && (
-              <Space wrap>
+              <Space wrap size={4}>
                 {characters.map(character => (
                   <Tag key={character} color="cyan">{character}</Tag>
                 ))}
@@ -832,12 +908,12 @@ function PlanPanel({
 
       {scenes.length > 0 && (
         <InfoBlock title="场景规划" currentTheme={currentTheme}>
-          <Space direction="vertical" size={10} style={{ width: '100%' }}>
+          <Space direction="vertical" size={6} style={{ width: '100%' }}>
             {scenes.map((scene, index) => (
               <div key={index} style={{
-                padding: 10,
+                padding: 8,
                 borderRadius: 6,
-                border: `1px solid ${currentTheme.border}`,
+                border: '1px solid ' + currentTheme.border,
               }}>
                 <div style={{ fontWeight: 700, marginBottom: 4 }}>场景 {index + 1}</div>
                 {'location' in scene && scene.location && <MetaLine label="地点" value={scene.location} />}
@@ -864,12 +940,12 @@ function InfoBlock({
 }) {
   return (
     <div style={{
-      padding: 14,
-      borderRadius: 8,
+      padding: 10,
+      borderRadius: 6,
       border: `1px solid ${currentTheme.border}`,
       background: currentTheme.mutedBg,
     }}>
-      <Space style={{ marginBottom: 10, fontWeight: 700 }}>
+      <Space style={{ marginBottom: 6, fontWeight: 700 }}>
         {icon}
         <span>{title}</span>
       </Space>

@@ -1,4 +1,4 @@
-"""章节上下文构建服务 - 实现RTCO框架的智能上下文构建"""
+﻿"""章节上下文构建服务 - 实现RTCO框架的智能上下文构建"""
 
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List
@@ -40,7 +40,9 @@ class OneToManyContext:
     min_word_count: int = 2500
     max_word_count: int = 4000
     narrative_perspective: str = "第三人称"
-    
+    end_anchor: str = ""               # 结束锚点（从outline解析，含三级Fallback）
+    continuation_anchor_hint: str = "" # 衔接锚点增强（传递给下一章）
+
     # === 本章基本信息 ===
     chapter_number: int = 1
     chapter_title: str = ""
@@ -92,7 +94,9 @@ class OneToOneContext:
     min_word_count: int = 2500
     max_word_count: int = 4000
     narrative_perspective: str = "第三人称"
-    
+    end_anchor: str = ""               # 结束锚点（从outline解析，含三级Fallback）
+    continuation_anchor_hint: str = "" # 衔接锚点增强（传递给下一章）
+
     # === 本章基本信息 ===
     chapter_number: int = 1
     chapter_title: str = ""
@@ -211,7 +215,14 @@ class OneToManyContextBuilder:
         
         # === P0-核心信息（始终构建）===
         context.chapter_outline = self._build_chapter_outline_1n(chapter, outline)
-        
+
+        # === 结束锚点（三级Fallback）===
+        context.end_anchor = self._resolve_end_anchor(chapter, outline)
+        if context.end_anchor:
+            logger.info(f"  ✅ 结束锚点: {context.end_anchor[:50]}...")
+        else:
+            logger.info("  ⚠️ 未设定锚点，将使用反抢跑约束")
+
         # === 最近10章expansion_plan摘要 ===
         if chapter_number > 1:
             context.recent_chapters_context = await self._build_recent_chapters_context(
@@ -232,6 +243,11 @@ class OneToManyContextBuilder:
             context.continuation_point = ending_info.get('ending_text')
             context.previous_chapter_summary = ending_info.get('summary')
             context.previous_chapter_events = ending_info.get('key_events')
+
+            # 增强：查询上一章的锚点（如有）
+            prev_anchor = ending_info.get('end_anchor', '')
+            if prev_anchor:
+                context.continuation_anchor_hint = prev_anchor
             logger.info(f"  ✅ 衔接锚点: {len(context.continuation_point or '')}字符")
         
         # === P1-重要信息 ===
@@ -279,6 +295,49 @@ class OneToManyContextBuilder:
         
         return context
     
+
+    @staticmethod
+    def _resolve_end_anchor(chapter, outline) -> str:
+        """
+        三级 Fallback 解析结束锚点，返回完整指令文本
+        
+        Tier 1: 用户手写 end_anchor >= 8 字 → 硬锁约束
+        Tier 2: outline.content 最后一句 >= 8 字 → 弱锚点参考
+        Tier 3: 以上都不满足 → 反抢跑约束
+        """
+        import re
+        raw = (getattr(chapter, 'end_anchor', None) or '').strip()
+        
+        if len(raw) >= 8:
+            return (
+                f"【🔴 结束锚点 - 必须严格遵守】\n"
+                f"本章最后一个镜头必须且只能定格在：{raw}\n"
+                f"严禁写到该画面之后的内容。不需要完成事件弧，不需要让角色离开场景。"
+            )
+        
+        if outline and outline.content:
+            content = outline.content.strip()
+            sentences = re.split(r'[。！？…]+', content)
+            last = sentences[-1].strip() if sentences else ''
+            if len(last) >= 8:
+                return (
+                    f"【🟡 结束参考 - 建议停在此处】\n"
+                    f"本章内容建议自然收束于以下画面附近：{last}\n"
+                    f"不需要强求写出'结束感'，素材用完后自然停止即可。"
+                )
+        
+        # Tier 3: 反抢跑约束
+        return (
+            "【⚠️ 内容边界 - 反抢跑约束】\n"
+            "本章只覆盖维细纲描述范围内的事件。\n"
+            "不需要完成完整的事件弧。\n"
+            "不需要写出事件的'收尾感'或'结束感'。\n"
+            "不需要让角色离开当前场景。\n"
+            "不需要写总结性、回顾性、感悟性段落。\n"
+            "维细纲素材覆盖完毕后自然停止。\n"
+            "严禁推进到维细纲未描述的事件。"
+        )
+
     def _build_chapter_outline_1n(
         self,
         chapter: Chapter,
@@ -1029,6 +1088,13 @@ class OneToOneContextBuilder:
         
         # === P0-核心信息 ===
         context.chapter_outline = self._build_outline_from_structure(outline, chapter)
+
+        # === 结束锚点（三级Fallback）===
+        context.end_anchor = OneToManyContextBuilder._resolve_end_anchor(chapter, outline)
+        if context.end_anchor:
+            logger.info(f"  ✅ 结束锚点: {context.end_anchor[:50]}...")
+        else:
+            logger.info("  ⚠️ 未设定锚点，将使用反抢跑约束")
         logger.info(f"  ✅ P0-大纲信息: {len(context.chapter_outline)}字符")
         
         # === P1-重要信息 ===

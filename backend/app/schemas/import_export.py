@@ -172,7 +172,7 @@ class PlotAnalysisExportData(BaseModel):
     """剧情分析导出数据"""
     chapter_title: str  # 通过章节标题关联
     plot_stage: Optional[str] = None
-    conflict_level: Optional[int] = None
+    conflict_level: Optional[float] = None
     conflict_types: Optional[List[str]] = None
     emotional_tone: Optional[str] = None
     emotional_intensity: Optional[float] = None

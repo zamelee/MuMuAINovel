@@ -60,8 +60,8 @@ class Foreshadow(Base):
     
     # === 重要性和优先级 ===
     importance = Column(Float, default=0.5, comment="重要性评分 0.0-1.0")
-    strength = Column(Integer, default=5, comment="伏笔强度 1-10(影响读者多强烈)")
-    subtlety = Column(Integer, default=5, comment="隐藏度 1-10(越高越隐蔽)")
+    strength = Column(Float, default=5.0, comment="伏笔强度 1-10(影响读者多强烈)")
+    subtlety = Column(Float, default=5.0, comment="隐藏度 1-10(越高越隐蔽)")
     urgency = Column(Integer, default=0, comment="紧急度: 0=不紧急, 1=需关注, 2=急需回收")
     
     # === 关联信息 ===

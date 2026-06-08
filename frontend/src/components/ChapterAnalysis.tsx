@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Modal, Spin, Alert, Tabs, Card, Tag, List, Empty, Statistic, Row, Col, Button, theme } from 'antd';
+import { Modal, Spin, Alert, Tabs, Card, Tag, List, Empty, Statistic, Row, Col, Button, theme, message, Radio, InputNumber } from 'antd';
 import {
   ThunderboltOutlined,
   BulbOutlined,
@@ -14,6 +14,7 @@ import {
   EditOutlined
 } from '@ant-design/icons';
 import type { AnalysisTask, ChapterAnalysisResponse } from '../types';
+import { chapterApi } from '../services/api';
 import ChapterRegenerationModal from './ChapterRegenerationModal';
 import ChapterContentComparison from './ChapterContentComparison';
 
@@ -36,6 +37,8 @@ export default function ChapterAnalysis({ chapterId, visible, onClose }: Chapter
   const [regenerationModalVisible, setRegenerationModalVisible] = useState(false);
   const [comparisonModalVisible, setComparisonModalVisible] = useState(false);
   const [chapterInfo, setChapterInfo] = useState<{ title: string; chapter_number: number; content: string } | null>(null);
+  const [checkingAnchor, setCheckingAnchor] = useState(false);
+  const [manualAnchorScore, setManualAnchorScore] = useState<number | null>(null);
   const [newGeneratedContent, setNewGeneratedContent] = useState('');
   const [newContentWordCount, setNewContentWordCount] = useState(0);
 
@@ -77,7 +80,31 @@ export default function ChapterAnalysis({ chapterId, visible, onClose }: Chapter
     }
   };
 
-  const fetchAnalysisStatus = async () => {
+  const [localStrategy, setLocalStrategy] = useState(() => localStorage.getItem('quick_check_strategy') || 'A+B');
+  const [localThreshold, setLocalThreshold] = useState(() => parseFloat(localStorage.getItem('quick_check_threshold') || '0.70'));
+
+  const handleCheckAnchor = async () => {
+    try {
+      setCheckingAnchor(true);
+      const strategy = localStorage.getItem('quick_check_strategy') || 'A+B';
+      const threshold = parseFloat(localStorage.getItem('quick_check_threshold') || '0.70');
+      const result = await chapterApi.checkAnchor(chapterId, { strategy, threshold });
+      if (result.compliance_score != null) {
+        setManualAnchorScore(result.compliance_score);
+        message.success(`锚点检测完成，得分: ${result.compliance_score}/10`);
+        if (result.suggestion) {
+          message.info(result.suggestion);
+        }
+      } else {
+        message.warning(result.message || '无法检测锚点');
+      }
+    } catch (err) {
+      message.error('锚点检测失败');
+    } finally {
+      setCheckingAnchor(false);
+    }
+  };
+const fetchAnalysisStatus = async () => {
     try {
       setLoading(true);
       setError(null);
@@ -113,6 +140,8 @@ export default function ChapterAnalysis({ chapterId, visible, onClose }: Chapter
       } else if (taskData.status === 'running' || taskData.status === 'pending') {
         // 开始轮询
         startPolling();
+      } else if (taskData.status === 'cancelled' || taskData.status === 'failed') {
+        setError(taskData.error_message || '分析任务已取消或失败，请重试');
       }
     } catch (err) {
       setError((err as Error).message);
@@ -148,9 +177,9 @@ export default function ChapterAnalysis({ chapterId, visible, onClose }: Chapter
           await fetchAnalysisResult();
           // 🔧 分析完成后刷新章节内容，确保显示最新内容
           await loadChapterInfo();
-        } else if (taskData.status === 'failed') {
+        } else if (taskData.status === 'failed' || taskData.status === 'cancelled') {
           clearInterval(pollInterval);
-          setError(taskData.error_message || '分析失败');
+          setError(taskData.error_message || '分析失败或已取消');
         }
       } catch (err) {
         console.error('轮询错误:', err);
@@ -206,7 +235,7 @@ export default function ChapterAnalysis({ chapterId, visible, onClose }: Chapter
   };
 
   const renderProgress = () => {
-    if (!task || task.status === 'completed') return null;
+    if (!task || task.status === 'completed' || task.status === 'cancelled' || task.status === 'failed') return null;
 
     return (
       <div style={{
@@ -232,6 +261,7 @@ export default function ChapterAnalysis({ chapterId, visible, onClose }: Chapter
             {task.status === 'pending' && '等待分析...'}
             {task.status === 'running' && 'AI正在分析中...'}
             {task.status === 'failed' && '分析失败'}
+            {task.status === 'cancelled' && '分析已取消'}
           </div>
         </div>
 
@@ -378,7 +408,7 @@ export default function ChapterAnalysis({ chapterId, visible, onClose }: Chapter
 
                 <Card title="整体评分" style={{ marginBottom: 16 }} size={isMobile ? 'small' : 'default'}>
                   <Row gutter={isMobile ? 8 : 16}>
-                    <Col span={isMobile ? 12 : 6}>
+                    <Col span={isMobile ? 12 : 4}>
                       <Statistic
                         title="整体质量"
                         value={analysis_data.overall_quality_score || 0}
@@ -386,26 +416,45 @@ export default function ChapterAnalysis({ chapterId, visible, onClose }: Chapter
                         valueStyle={{ color: 'var(--color-success)' }}
                       />
                     </Col>
-                    <Col span={isMobile ? 12 : 6}>
+                    <Col span={isMobile ? 12 : 4}>
                       <Statistic
                         title="节奏把控"
                         value={analysis_data.pacing_score || 0}
                         suffix="/ 10"
                       />
                     </Col>
-                    <Col span={isMobile ? 12 : 6}>
+                    <Col span={isMobile ? 12 : 4}>
                       <Statistic
                         title="吸引力"
                         value={analysis_data.engagement_score || 0}
                         suffix="/ 10"
                       />
                     </Col>
-                    <Col span={isMobile ? 12 : 6}>
+                    <Col span={isMobile ? 12 : 4}>
                       <Statistic
                         title="连贯性"
                         value={analysis_data.coherence_score || 0}
                         suffix="/ 10"
                       />
+                    </Col>
+                    <Col span={isMobile ? 12 : 4}>
+                      <div style={{ display: "flex", alignItems: "flex-start", gap: 4 }}>
+                        <Statistic
+                          title="锚点合规"
+                          value={manualAnchorScore ?? analysis_data.anchor_compliance_score ?? "-"}
+                          suffix={typeof (manualAnchorScore ?? analysis_data.anchor_compliance_score) === "number" ? "/ 10" : ""}
+                          valueStyle={{ color: ((manualAnchorScore ?? analysis_data.anchor_compliance_score) ?? 10) < 5 ? "#ff4d4f" : ((manualAnchorScore ?? analysis_data.anchor_compliance_score) ?? 10) < 7 ? "#faad14" : "var(--color-success)" }}
+                        />
+                        <Button
+                          type="text"
+                          size="small"
+                          icon={<ReloadOutlined spin={checkingAnchor} />}
+                          loading={checkingAnchor}
+                          onClick={handleCheckAnchor}
+                          style={{ marginTop: 2 }}
+                          title="手动锚点检测（本地算法，0 token）"
+                        />
+                      </div>
                     </Col>
                   </Row>
                 </Card>
@@ -489,7 +538,7 @@ export default function ChapterAnalysis({ chapterId, visible, onClose }: Chapter
                       dataSource={analysis_data.suggestions}
                       renderItem={(item, index) => (
                         <List.Item>
-                          <span>{index + 1}. {item}</span>
+                          <span style={{ color: item.startsWith("❌") ? "#ff4d4f" : undefined, fontWeight: item.startsWith("❌") ? 600 : undefined }}>{index + 1}. {item}</span>
                         </List.Item>
                       )}
                     />
@@ -739,7 +788,7 @@ export default function ChapterAnalysis({ chapterId, visible, onClose }: Chapter
             开始分析
           </Button>
         ),
-        task && (task.status === 'failed') && (
+        task && (task.status === 'failed' || task.status === 'cancelled') && (
           <Button
             key="reanalyze"
             type="primary"

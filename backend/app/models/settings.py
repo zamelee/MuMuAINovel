@@ -40,6 +40,7 @@ class Settings(Base):
     email_register_enabled = Column(Boolean, default=True, server_default="1", nullable=False, comment="是否启用邮箱注册")
     verification_code_ttl_minutes = Column(Integer, default=10, server_default="10", nullable=False, comment="验证码有效期（分钟）")
     verification_resend_interval_seconds = Column(Integer, default=60, server_default="60", nullable=False, comment="验证码重发间隔（秒）")
+    allow_private_api_url = Column(Boolean, default=False, server_default="0", nullable=False, comment="是否允许私有/本地API地址")
 
     preferences = Column(Text, comment="其他偏好设置(JSON)")
     created_at = Column(DateTime, server_default=func.now(), comment="创建时间")

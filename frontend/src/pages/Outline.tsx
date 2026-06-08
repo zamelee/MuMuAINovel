@@ -1270,6 +1270,31 @@ export default function Outline() {
                       </Space>
                     </Card>
 
+                    <Card size="small" title={
+                    <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", width: "100%" }}>
+                      <span>{plan.end_anchor ? "🔴 结束锚点" : "⚠️ 结束锚点"}</span>
+                      <Space size={4}>
+                        <Button size="small" type="link" icon={<EditOutlined />} style={{ fontSize: 11, padding: "0 4px", height: 20 }}
+                          onClick={async (e: React.MouseEvent) => { e.stopPropagation(); const id = data.chapters?.[idx]?.id; const a = prompt("修改锚点：", plan.end_anchor || ""); if (a !== null && id) { try { await fetch("/api/chapters/" + id, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ end_anchor: a }) }); message.success("锚点已保存"); setTimeout(() => Modal.destroyAll(), 100); } catch { message.error("保存失败"); } } }}
+                        />
+                        <Button size="small" type="link" icon={<ThunderboltOutlined />} style={{ fontSize: 11, padding: "0 4px", height: 20 }}
+                          onClick={async (e: React.MouseEvent) => { e.stopPropagation(); const id = data.chapters?.[idx]?.id; if (!id) return; try { const r = await fetch("/api/chapters/" + id + "/fill-anchor", { method: "POST" }); if (r.ok) { const d = await r.json(); if (d.skipped) message.info(d.reason || "跳过"); else { message.success("锚点已补全"); setTimeout(() => Modal.destroyAll(), 100); } } else { message.error("补全失败"); } } catch { message.error("补全失败"); } }}
+                        />
+                      </Space>
+                    </div>
+                  }>
+                      <textarea
+                        defaultValue={plan.end_anchor || ""}
+                        id={"anchor-ta-" + idx}
+                        rows={2}
+                        style={{ width: "100%", fontSize: 12, padding: 4, borderRadius: 4, border: "1px solid #d9d9d9", resize: "vertical", marginBottom: 4 }}
+                        placeholder="未设置。建议填写以防止AI抢跑。"
+                      />
+                      <Button size="small" type="primary" style={{ fontSize: 11 }}
+                        onClick={async () => { const ta = document.getElementById("anchor-ta-" + idx) as HTMLTextAreaElement; const v = ta?.value?.trim() || ""; const id = data.chapters?.[idx]?.id; if (id) { try { await fetch("/api/chapters/" + id, { method: "PUT", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ end_anchor: v }) }); message.success("锚点已保存"); setTimeout(() => Modal.destroyAll(), 100); } catch { message.error("保存失败"); } } }}
+                      >保存</Button>
+                    </Card>
+
                     <Card size="small" title="涉及角色">
                       <Space wrap style={{ maxWidth: '100%' }}>
                         {plan.character_focus.map((char, charIdx) => (

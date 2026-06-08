@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
-import { List, Button, Modal, Form, Input, Select, message, Empty, Space, Badge, Tag, Card, InputNumber, Alert, Radio, Descriptions, Collapse, Popconfirm, Pagination, theme } from 'antd';
+import { List, Button, Checkbox, Modal, Form, Input, Select, message, Empty, Space, Badge, Tag, Card, InputNumber, Alert, Radio, Descriptions, Collapse, Popconfirm, Pagination, theme, Tooltip } from 'antd';
 import { EditOutlined, FileTextOutlined, ThunderboltOutlined, LockOutlined, DownloadOutlined, SettingOutlined, FundOutlined, SyncOutlined, CheckCircleOutlined, CloseCircleOutlined, RocketOutlined, StopOutlined, InfoCircleOutlined, CaretRightOutlined, DeleteOutlined, BookOutlined, FormOutlined, PlusOutlined, ReadOutlined } from '@ant-design/icons';
 import { useStore } from '../store';
 import { eventBus } from '../store/eventBus';
@@ -20,6 +20,12 @@ const { TextArea } = Input;
 // localStorage 缓存键名
 const WORD_COUNT_CACHE_KEY = 'chapter_default_word_count';
 const DEFAULT_WORD_COUNT = 3000;
+const CHAR_TOKEN_RATIO_CACHE_KEY = "chapter_char_token_ratio";
+const DEFAULT_CHAR_TOKEN_RATIO = 1.5;
+const QUICK_CHECK_STRATEGY_KEY = "quick_check_strategy";
+const QUICK_CHECK_THRESHOLD_KEY = "quick_check_threshold";
+const DEFAULT_QUICK_CHECK_STRATEGY = "A+B";
+const DEFAULT_QUICK_CHECK_THRESHOLD = 0.70;
 
 // 从 localStorage 读取缓存的字数
 const getCachedWordCount = (): number => {
@@ -46,6 +52,38 @@ const setCachedWordCount = (value: number): void => {
   }
 };
 
+const getCachedCharTokenRatio = (): number => {
+  try {
+    const cached = localStorage.getItem(CHAR_TOKEN_RATIO_CACHE_KEY);
+    if (cached) {
+      const value = parseFloat(cached);
+      if (!isNaN(value) && value >= 1.0 && value <= 5.0) return value;
+    }
+  } catch (error) { console.warn("getCachedCharTokenRatio failed:", error); }
+  return DEFAULT_CHAR_TOKEN_RATIO;
+};
+
+const setCachedCharTokenRatio = (value: number): void => {
+  try { localStorage.setItem(CHAR_TOKEN_RATIO_CACHE_KEY, String(value)); }
+  catch (error) { console.warn("setCachedCharTokenRatio failed:", error); }
+};
+
+const getCachedQuickCheckStrategy = (): string => {
+  try {
+    const cached = localStorage.getItem(QUICK_CHECK_STRATEGY_KEY);
+    if (cached && ["A", "B", "A+B"].includes(cached)) return cached;
+  } catch (error) { console.warn("getCachedQuickCheckStrategy failed:", error); }
+  return DEFAULT_QUICK_CHECK_STRATEGY;
+};
+
+const getCachedQuickCheckThreshold = (): number => {
+  try {
+    const cached = localStorage.getItem(QUICK_CHECK_THRESHOLD_KEY);
+    if (cached) { const value = parseFloat(cached); if (!isNaN(value) && value >= 0.3 && value <= 1.0) return value; }
+  } catch (error) { console.warn("getCachedQuickCheckThreshold failed:", error); }
+  return DEFAULT_QUICK_CHECK_THRESHOLD;
+};
+
 export default function Chapters() {
   const { currentProject, chapters, outlines, setCurrentChapter, setCurrentProject } = useStore();
   const [modal, contextHolder] = Modal.useModal();
@@ -57,6 +95,7 @@ export default function Chapters() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form] = Form.useForm();
   const [editorForm] = Form.useForm();
+  const editorContent = Form.useWatch('content', editorForm);
   const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
   const contentTextAreaRef = useRef<TextAreaRef>(null);
   const [writingStyles, setWritingStyles] = useState<WritingStyle[]>([]);
@@ -100,6 +139,25 @@ export default function Chapters() {
   // 单章节生成进度状态
   const [singleChapterProgress, setSingleChapterProgress] = useState(0);
   const [singleChapterProgressMessage, setSingleChapterProgressMessage] = useState('');
+
+  // 字元比状态
+  const [charTokenRatio, setCharTokenRatio] = useState<number>(getCachedCharTokenRatio);
+
+  // 初步检测状态
+  const [quickCheckResult, setQuickCheckResult] = useState<{ anchor_score?: number | null; boundary_ok?: boolean; summary?: string } | null>(null);
+  const [quickCheckStrategy, setQuickCheckStrategy] = useState<string>(getCachedQuickCheckStrategy);
+  const [quickCheckThreshold, setQuickCheckThreshold] = useState<number>(getCachedQuickCheckThreshold);
+  const [recheckingAnchor, setRecheckingAnchor] = useState(false);
+
+  // 自动分析状态
+  const [autoAnalysisEnabled, setAutoAnalysisEnabled] = useState(() => {
+    try { return localStorage.getItem('auto_analysis_enabled') !== 'false'; } catch { return true; }
+  });
+  const [autoAnalysisDelay, setAutoAnalysisDelay] = useState(() => {
+    try { const v = parseInt(localStorage.getItem('auto_analysis_delay') || '30'); return v >= 10 && v <= 120 ? v : 30; } catch { return 30; }
+  });
+  const [chapterCountdowns, setChapterCountdowns] = useState<Record<string, number>>({});
+  const countdownIntervalsRef = useRef<Record<string, ReturnType<typeof setInterval>>>({});
 
 
   // 批量生成相关状态
@@ -391,7 +449,7 @@ export default function Chapters() {
 
       activeIds.forEach((chapterId) => {
         const task = tasksMap[chapterId];
-        if (!task || task.status === 'completed' || task.status === 'failed' || task.status === 'none') {
+        if (!task || task.status === 'completed' || task.status === 'failed' || task.status === 'none' || task.status === 'cancelled') {
           activeAnalysisPollingIdsRef.current.delete(chapterId);
 
           if (task?.status === 'completed') {
@@ -806,13 +864,58 @@ export default function Chapters() {
         content: chapter.content,
       });
       setEditingId(id);
+      setQuickCheckResult(null);
       setTemporaryNarrativePerspective(undefined); // 重置人称选择
       setSelectedSkillKey(undefined); // 重置Skill选择
       setIsEditorOpen(true);
       // 打开编辑窗口时加载模型列表和Skill列表
       loadAvailableModels();
       loadAvailableSkills();
+      // 读取已持久化的锚点分数
+      chapterApi.getAnchorScore(id).then(res => {
+        if (res.anchor_compliance_score != null) {
+          setQuickCheckResult(prev => ({ ...prev, anchor_score: res.anchor_compliance_score }));
+        }
+      }).catch(() => {});
     }
+  };
+
+  const handleRecheckAnchor = async () => {
+    if (!editingId) return;
+    setRecheckingAnchor(true);
+    try {
+      const result = await chapterApi.checkAnchor(editingId, { strategy: quickCheckStrategy, threshold: quickCheckThreshold });
+      if (result.compliance_score != null) {
+        setQuickCheckResult(prev => ({ ...prev, anchor_score: result.compliance_score, summary: result.suggestion || prev?.summary || '' }));
+        message.success('锚点检测完成，得分: ' + result.compliance_score + '/10');
+      }
+    } catch (err) { message.error('重新检测失败'); }
+    finally { setRecheckingAnchor(false); }
+  };
+
+  const cancelChapterCountdown = (chapterId: string) => {
+    if (countdownIntervalsRef.current[chapterId]) {
+      clearInterval(countdownIntervalsRef.current[chapterId]);
+      delete countdownIntervalsRef.current[chapterId];
+    }
+    setChapterCountdowns(prev => { const next = { ...prev }; delete next[chapterId]; return next; });
+  };
+
+  const startChapterCountdown = (chapterId: string) => {
+    cancelChapterCountdown(chapterId);
+    setChapterCountdowns(prev => ({ ...prev, [chapterId]: autoAnalysisDelay }));
+    countdownIntervalsRef.current[chapterId] = setInterval(() => {
+      setChapterCountdowns(prev => {
+        const current = prev[chapterId];
+        if (current === undefined || current <= 1) {
+          clearInterval(countdownIntervalsRef.current[chapterId]);
+          delete countdownIntervalsRef.current[chapterId];
+          chapterApi.startAnalysis(chapterId).then(() => startPollingTask(chapterId)).catch(() => {});
+          const next = { ...prev }; delete next[chapterId]; return next;
+        }
+        return { ...prev, [chapterId]: current - 1 };
+      });
+    }, 1000);
   };
 
   const handleEditorSubmit = async (values: ChapterUpdate) => {
@@ -865,9 +968,7 @@ export default function Chapters() {
         selectedSkillKey  // 传递选中的Skill
       );
 
-      message.success('AI创作成功，正在分析章节内容...');
-
-      // 如果返回了分析任务ID，启动轮询
+      // 如果返回了分析任务ID
       if (result?.analysis_task_id) {
         const taskId = result.analysis_task_id;
         setAnalysisTasksMap(prev => ({
@@ -881,8 +982,16 @@ export default function Chapters() {
           }
         }));
 
-        // 启动轮询
-        startPollingTask(editingId);
+        if (autoAnalysisEnabled) {
+          // 启用自动分析 → 启动倒计时，倒计时结束调用 startAnalysis
+          message.success('AI创作成功！' + autoAnalysisDelay + '秒后自动开始分析');
+          startChapterCountdown(editingId);
+        } else {
+          // 未启用自动分析 → 只提示，不启动分析
+          message.success('AI创作成功！初步检测已完成，可手动启动LLM分析');
+        }
+      } else {
+        message.success('AI创作成功！');
       }
     } catch (error) {
       const apiError = error as ApiError;
@@ -2035,6 +2144,46 @@ export default function Chapters() {
       </div>
 
 
+      {/* 自动分析设置 */}
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 12,
+        padding: '6px 0',
+        marginBottom: 8,
+        borderBottom: '1px solid ' + token.colorBorderSecondary,
+        flexWrap: 'wrap'
+      }}>
+        <Checkbox
+          checked={autoAnalysisEnabled}
+          onChange={e => {
+            const val = e.target.checked;
+            setAutoAnalysisEnabled(val);
+            localStorage.setItem('auto_analysis_enabled', String(val));
+            if (!val) { setChapterCountdowns({}); Object.values(countdownIntervalsRef.current).forEach(clearInterval); countdownIntervalsRef.current = {}; }
+          }}
+        >
+          启用章节生成后自动分析
+        </Checkbox>
+        {autoAnalysisEnabled && (
+          <>
+            <span style={{ fontSize: 13, color: token.colorTextSecondary }}>倒计时</span>
+            <InputNumber
+              min={10} max={120} step={5}
+              value={autoAnalysisDelay}
+              onChange={v => {
+                const val = v ?? 30;
+                setAutoAnalysisDelay(val);
+                localStorage.setItem('auto_analysis_delay', String(val));
+              }}
+              size='small'
+              style={{ width: 70 }}
+              addonAfter="秒"
+            />
+          </>
+        )}
+      </div>
+
       <div style={{ flex: 1, overflowY: 'auto', minHeight: 0 }}>
         {chapters.length === 0 ? (
           <Empty description="还没有章节，开始创作吧！" />
@@ -2075,24 +2224,27 @@ export default function Chapters() {
                   </Button>,
                   (() => {
                     const task = analysisTasksMap[item.id];
+                    const countdown = chapterCountdowns[item.id];
                     const isAnalyzing = task && (task.status === 'pending' || task.status === 'running');
                     const hasContent = item.content && item.content.trim() !== '';
+                    const isCountingDown = countdown !== undefined && countdown > 0;
 
                     return (
+                      <Tooltip title={isCountingDown ? '点击取消自动分析' : (!hasContent ? '请先生成章节内容' : isAnalyzing ? '分析进行中，请稍候...' : '')}>
                       <Button
                         type="text"
                         icon={isAnalyzing ? <SyncOutlined spin /> : <FundOutlined />}
-                        onClick={() => handleShowAnalysis(item.id)}
+                        onClick={() => {
+                          if (isCountingDown) { cancelChapterCountdown(item.id); }
+                          else { handleShowAnalysis(item.id); }
+                        }}
                         disabled={!hasContent || isAnalyzing}
                         loading={isAnalyzing}
-                        title={
-                          !hasContent ? '请先生成章节内容' :
-                            isAnalyzing ? '分析进行中，请稍候...' :
-                              ''
-                        }
+                        style={isCountingDown ? { color: token.colorWarning, fontWeight: 'bold' } : undefined}
                       >
-                        {isAnalyzing ? '分析中' : '分析'}
+                      {isCountingDown ? `${countdown}s后分析` : (isAnalyzing ? '分析中' : '分析')}
                       </Button>
+                      </Tooltip>
                     );
                   })(),
                   <Button
@@ -2161,24 +2313,29 @@ export default function Chapters() {
                       />
                       {(() => {
                         const task = analysisTasksMap[item.id];
-                        const isAnalyzing = task && (task.status === 'pending' || task.status === 'running');
-                        const hasContent = item.content && item.content.trim() !== '';
+const countdown = chapterCountdowns[item.id];
+const isAnalyzing = task && (task.status === 'pending' || task.status === 'running');
+const hasContent = item.content && item.content.trim() !== '';
+const isCountingDown = countdown !== undefined && countdown > 0;
 
-                        return (
-                          <Button
-                            type="text"
-                            icon={isAnalyzing ? <SyncOutlined spin /> : <FundOutlined />}
-                            onClick={() => handleShowAnalysis(item.id)}
-                            size="small"
-                            disabled={!hasContent || isAnalyzing}
-                            loading={isAnalyzing}
-                            title={
-                              !hasContent ? '请先生成章节内容' :
-                                isAnalyzing ? '分析中' :
-                                  '分析'
-                            }
-                          />
-                        );
+return (
+  <Tooltip title={isCountingDown ? '点击取消自动分析' : (!hasContent ? '请先生成章节内容' : isAnalyzing ? '分析中' : '')}>
+  <Button
+    type="text"
+    icon={isAnalyzing ? <SyncOutlined spin /> : <FundOutlined />}
+    onClick={() => {
+      if (isCountingDown) { cancelChapterCountdown(item.id); }
+      else { handleShowAnalysis(item.id); }
+    }}
+    size="small"
+    disabled={!hasContent || isAnalyzing}
+    loading={isAnalyzing}
+    style={isCountingDown ? { color: token.colorWarning, fontWeight: 'bold' } : undefined}
+  >
+  {isCountingDown ? `${countdown}s` : ''}
+  </Button>
+  </Tooltip>
+);
                       })()}
                       <Button
                         type="text"
@@ -2261,25 +2418,28 @@ export default function Chapters() {
                         </Button>,
                         (() => {
                           const task = analysisTasksMap[item.id];
-                          const isAnalyzing = task && (task.status === 'pending' || task.status === 'running');
-                          const hasContent = item.content && item.content.trim() !== '';
+const countdown = chapterCountdowns[item.id];
+const isAnalyzing = task && (task.status === 'pending' || task.status === 'running');
+const hasContent = item.content && item.content.trim() !== '';
+const isCountingDown = countdown !== undefined && countdown > 0;
 
-                          return (
-                            <Button
-                              type="text"
-                              icon={isAnalyzing ? <SyncOutlined spin /> : <FundOutlined />}
-                              onClick={() => handleShowAnalysis(item.id)}
-                              disabled={!hasContent || isAnalyzing}
-                              loading={isAnalyzing}
-                              title={
-                                !hasContent ? '请先生成章节内容' :
-                                  isAnalyzing ? '分析进行中，请稍候...' :
-                                    ''
-                              }
-                            >
-                              {isAnalyzing ? '分析中' : '分析'}
-                            </Button>
-                          );
+return (
+  <Tooltip title={isCountingDown ? '点击取消自动分析' : (!hasContent ? '请先生成章节内容' : isAnalyzing ? '分析进行中，请稍候...' : '')}>
+  <Button
+    type="text"
+    icon={isAnalyzing ? <SyncOutlined spin /> : <FundOutlined />}
+    onClick={() => {
+      if (isCountingDown) { cancelChapterCountdown(item.id); }
+      else { handleShowAnalysis(item.id); }
+    }}
+    disabled={!hasContent || isAnalyzing}
+    loading={isAnalyzing}
+    style={isCountingDown ? { color: token.colorWarning, fontWeight: 'bold' } : undefined}
+  >
+  {isCountingDown ? `${countdown}s后分析` : (isAnalyzing ? '分析中' : '分析')}
+  </Button>
+  </Tooltip>
+);
                         })(),
                         <Button
                           type="text"
@@ -2386,24 +2546,29 @@ export default function Chapters() {
                             />
                             {(() => {
                               const task = analysisTasksMap[item.id];
-                              const isAnalyzing = task && (task.status === 'pending' || task.status === 'running');
-                              const hasContent = item.content && item.content.trim() !== '';
+const countdown = chapterCountdowns[item.id];
+const isAnalyzing = task && (task.status === 'pending' || task.status === 'running');
+const hasContent = item.content && item.content.trim() !== '';
+const isCountingDown = countdown !== undefined && countdown > 0;
 
-                              return (
-                                <Button
-                                  type="text"
-                                  icon={isAnalyzing ? <SyncOutlined spin /> : <FundOutlined />}
-                                  onClick={() => handleShowAnalysis(item.id)}
-                                  size="small"
-                                  disabled={!hasContent || isAnalyzing}
-                                  loading={isAnalyzing}
-                                  title={
-                                    !hasContent ? '请先生成章节内容' :
-                                      isAnalyzing ? '分析中' :
-                                        '分析'
-                                  }
-                                />
-                              );
+return (
+  <Tooltip title={isCountingDown ? '点击取消自动分析' : (!hasContent ? '请先生成章节内容' : isAnalyzing ? '分析中' : '')}>
+  <Button
+    type="text"
+    icon={isAnalyzing ? <SyncOutlined spin /> : <FundOutlined />}
+    onClick={() => {
+      if (isCountingDown) { cancelChapterCountdown(item.id); }
+      else { handleShowAnalysis(item.id); }
+    }}
+    size="small"
+    disabled={!hasContent || isAnalyzing}
+    loading={isAnalyzing}
+    style={isCountingDown ? { color: token.colorWarning, fontWeight: 'bold' } : undefined}
+  >
+  {isCountingDown ? `${countdown}s` : ''}
+  </Button>
+  </Tooltip>
+);
                             })()}
                             <Button
                               type="text"
@@ -2723,6 +2888,26 @@ export default function Chapters() {
             </Form.Item>
 
             <Form.Item
+              label="字元比"
+              tooltip="1个中文字≈几个token，用于估算max_tokens。默认1.5，越大模型生成空间越充裕"
+              style={{ flex: 1, marginBottom: isMobile ? 16 : 0 }}
+            >
+              <InputNumber
+                min={1.0}
+                max={5.0}
+                step={0.1}
+                value={charTokenRatio}
+                onChange={(v) => {
+                  const val = v ?? 1.5;
+                  setCharTokenRatio(val);
+                  setCachedCharTokenRatio(val);
+                }}
+                disabled={isGenerating}
+                style={{ width: '100%' }}
+              />
+            </Form.Item>
+
+            <Form.Item
               label="AI模型"
               tooltip="选择用于生成章节内容的AI模型，不选择则使用默认模型"
               style={{ flex: 1, marginBottom: isMobile ? 16 : 0 }}
@@ -2765,9 +2950,77 @@ export default function Chapters() {
             />
           </div>
 
-          <Form.Item>
-            <Space style={{ width: '100%', justifyContent: 'flex-end', flexDirection: isMobile ? 'column' : 'row', alignItems: isMobile ? 'stretch' : 'center' }}>
-              <Space style={{ width: isMobile ? '100%' : 'auto' }}>
+          <Form.Item style={{ marginBottom: 0 }}>
+            <div style={{
+              display: 'flex',
+              alignItems: 'center',
+              justifyContent: 'space-between',
+              flexWrap: 'wrap',
+              gap: 12,
+              padding: '10px 0',
+              borderTop: '1px solid ' + token.colorBorderSecondary
+            }}>
+              {/* 当前字数 */}
+              <span style={{ fontSize: 13, color: token.colorTextSecondary, whiteSpace: 'nowrap' }}>
+                当前字数: <strong>{editorContent?.length || 0}</strong>
+              </span>
+
+              {/* 初步检测 */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                <span style={{ fontSize: 12, color: token.colorTextSecondary, whiteSpace: 'nowrap', fontWeight: 500 }}>初步检测</span>
+                  <Radio.Group
+                    size="small"
+                    value={quickCheckStrategy}
+                    onChange={(e) => {
+                      const v = e.target.value;
+                      setQuickCheckStrategy(v);
+                      localStorage.setItem(QUICK_CHECK_STRATEGY_KEY, v);
+                    }}
+                    optionType="button"
+                    buttonStyle="solid"
+                  >
+                    <Tooltip title="jieba分词关键词匹配：锚点文本分词后在章节末尾500字中匹配关键词。速度快，但无法识别同义词替换">
+                      <Radio.Button value="A">A</Radio.Button>
+                    </Tooltip>
+                    <Tooltip title="MiniLM语义向量相似度：用embedding模型将锚点与文末编码为向量，计算余弦相似度。能识别同义表达，首次加载模型需数秒">
+                      <Radio.Button value="B">B</Radio.Button>
+                    </Tooltip>
+                    <Tooltip title="A+B 综合策略：先用jieba快速打分，分数≥阈值则直接返回；低于阈值时自动启用embedding兜底。兼顾速度与准确度（推荐）">
+                      <Radio.Button value="A+B">A+B</Radio.Button>
+                    </Tooltip>
+                  </Radio.Group>
+                <span style={{ fontSize: 12, color: token.colorTextSecondary, marginLeft: 4 }}>阈值</span>
+                <InputNumber
+                  size="small"
+                  min={0.3}
+                  max={1.0}
+                  step={0.05}
+                  value={quickCheckThreshold}
+                  onChange={(v) => {
+                    const val = v ?? 0.7;
+                    setQuickCheckThreshold(val);
+                    localStorage.setItem(QUICK_CHECK_THRESHOLD_KEY, String(val));
+                  }}
+                  style={{ width: 65 }}
+                  placeholder="0.7"
+                />
+                <Button
+                  size="small"
+                  icon={<ThunderboltOutlined />}
+                  loading={recheckingAnchor}
+                  onClick={handleRecheckAnchor}
+                  title="重新锚点评分"
+                />
+                {quickCheckResult?.anchor_score != null && (
+                  <Tag color={quickCheckResult.anchor_score >= 7 ? 'green' : quickCheckResult.anchor_score >= 4 ? 'orange' : 'red'}
+                    style={{ marginLeft: 0 }}>
+                    锚点评估分数: {quickCheckResult.anchor_score}/10
+                  </Tag>
+                )}
+              </div>
+
+              {/* 操作按钮 */}
+              <Space>
                 <Button
                   onClick={() => {
                     if (isGenerating) {
@@ -2776,21 +3029,21 @@ export default function Chapters() {
                     }
                     setIsEditorOpen(false);
                   }}
-                  block={isMobile}
                   disabled={isGenerating}
+                  size="small"
                 >
                   取消
                 </Button>
                 <Button
                   type="primary"
                   htmlType="submit"
-                  block={isMobile}
                   disabled={isGenerating}
+                  size="small"
                 >
                   保存章节
                 </Button>
               </Space>
-            </Space>
+            </div>
           </Form.Item>
         </Form>
       </Modal>

@@ -107,8 +107,23 @@ const ChapterContentComparison: React.FC<ChapterContentComparisonProps> = ({
       // 先调用 onApply 通知父组件刷新
       onApply();
 
-      // 延迟触发章节分析，给父组件时间刷新
-      setTimeout(async () => {
+      // 倒计时后自动触发章节分析
+      const countdownKey = 'analysis-countdown';
+      let seconds = 5;
+      message.loading({ content: `${seconds}秒后自动开始章节分析`, key: countdownKey, duration: 0 });
+      
+      const countdownTimer = setInterval(() => {
+        seconds -= 1;
+        if (seconds <= 0) {
+          clearInterval(countdownTimer);
+          message.destroy(countdownKey);
+          triggerAnalysis();
+        } else {
+          message.loading({ content: `${seconds}秒后自动开始章节分析`, key: countdownKey, duration: 0 });
+        }
+      }, 1000);
+
+      const triggerAnalysis = async () => {
         try {
           const analysisResponse = await fetch(`/api/chapters/${chapterId}/analyze`, {
             method: 'POST',
@@ -126,7 +141,7 @@ const ChapterContentComparison: React.FC<ChapterContentComparisonProps> = ({
           console.error('触发分析失败:', analysisError);
           message.warning('章节分析触发失败，您可以手动触发分析');
         }
-      }, 500);
+      };
 
       onClose();
     } catch (error: unknown) {
