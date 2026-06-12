@@ -661,6 +661,7 @@ class OneToManyContextBuilder:
 
             chapter_ids = [row[0] for row in recent_chapters]
             summary_map: Dict[str, str] = {}
+            # Batch 1: PlotAnalysis 全字段读取（之前只取 plot_points + character_states）
             analysis_map: Dict[str, Any] = {}
             if chapter_ids:
                 summary_result = await db.execute(
@@ -671,13 +672,46 @@ class OneToManyContextBuilder:
                 summary_map = {chapter_id: content for chapter_id, content in summary_result.all()}
 
                 analysis_result = await db.execute(
-                    select(PlotAnalysis.chapter_id, PlotAnalysis.plot_points, PlotAnalysis.character_states)
+                    select(
+                        PlotAnalysis.chapter_id,
+                        PlotAnalysis.plot_points,
+                        PlotAnalysis.character_states,
+                        PlotAnalysis.hooks,
+                        PlotAnalysis.foreshadows,
+                        PlotAnalysis.scenes,
+                        PlotAnalysis.emotional_curve,
+                        PlotAnalysis.emotional_tone,
+                        PlotAnalysis.emotional_intensity,
+                        PlotAnalysis.pacing,
+                        PlotAnalysis.conflict_level,
+                        PlotAnalysis.conflict_types,
+                        PlotAnalysis.suggestions,
+                        PlotAnalysis.overall_quality_score,
+                        PlotAnalysis.anchor_compliance_score,
+                    )
                     .where(PlotAnalysis.chapter_id.in_(chapter_ids))
                 )
-                analysis_map = {
-                    chapter_id: {"plot_points": plot_points or [], "character_states": character_states or []}
-                    for chapter_id, plot_points, character_states in analysis_result.all()
-                }
+                for row in analysis_result.all():
+                    (chapter_id, plot_points, character_states, hooks, foreshadows,
+                     scenes, emotional_curve, emotional_tone, emotional_intensity,
+                     pacing, conflict_level, conflict_types, suggestions,
+                     overall_score, anchor_score) = row
+                    analysis_map[chapter_id] = {
+                        "plot_points": plot_points or [],
+                        "character_states": character_states or [],
+                        "hooks": hooks or [],
+                        "foreshadows": foreshadows or [],
+                        "scenes": scenes or [],
+                        "emotional_curve": emotional_curve or {},
+                        "emotional_tone": emotional_tone,
+                        "emotional_intensity": emotional_intensity,
+                        "pacing": pacing,
+                        "conflict_level": conflict_level,
+                        "conflict_types": conflict_types or [],
+                        "suggestions": suggestions or [],
+                        "overall_quality_score": overall_score,
+                        "anchor_compliance_score": anchor_score,
+                    }
 
             lines = ["【最近章节脉络】"]
             for ch_id, ch_num, ch_title, expansion_plan, summary in recent_chapters:
@@ -685,16 +719,21 @@ class OneToManyContextBuilder:
                 analysis = analysis_map.get(ch_id)
                 if real_summary:
                     line = f"第{ch_num}章《{ch_title}》：{real_summary[:180]}"
-                    if analysis and analysis.get("plot_points"):
-                        points = []
-                        for point in analysis["plot_points"][:3]:
-                            if isinstance(point, dict):
-                                points.append(str(point.get("content") or ""))
-                            else:
-                                points.append(str(point))
-                        points = [p for p in points if p]
-                        if points:
-                            line += f"（真实情节点：{'；'.join(points)}）"
+                    if analysis:
+                        if analysis.get("plot_points"):
+                            points = []
+                            for point in analysis["plot_points"][:3]:
+                                if isinstance(point, dict):
+                                    points.append(str(point.get("content") or ""))
+                                else:
+                                    points.append(str(point))
+                            points = [p for p in points if p]
+                            if points:
+                                line += f"\n    情节点：{'；'.join(points)}"
+                        # Batch 1: 拼接 PlotAnalysis 结构化块
+                        structured = self._format_plot_analysis_block(analysis, ch_num)
+                        if structured:
+                            line += "\n" + structured
                     lines.append(line)
                 elif expansion_plan:
                     try:
@@ -704,7 +743,7 @@ class OneToManyContextBuilder:
                         events_str = '；'.join(key_events[:3]) if key_events else ''
                         line = f"第{ch_num}章《{ch_title}》：{plot_summary}"
                         if events_str:
-                            line += f"（关键事件：{events_str}）"
+                            line += f"\n    关键事件：{events_str}"
                         lines.append(line)
                     except json.JSONDecodeError:
                         if summary:
@@ -902,6 +941,140 @@ class OneToManyContextBuilder:
             logger.error(f"❌ 获取相关记忆失败: {str(e)}")
             return None
     
+    @staticmethod
+    def _format_plot_analysis_block(analysis: Dict[str, Any], chapter_number: int) -> str:
+        """
+        Batch 1: 把 PlotAnalysis 行的非 plot_points/character_states 字段
+        格式化成结构化文本片段，紧跟 chapter summary 之后注入 prompt。
+        每个非空字段独立成行（key: value 形式），方便模型 attention 抓取。
+        """
+        parts = []
+
+        # 1) 情绪弧（数值化）
+        curve = analysis.get("emotional_curve")
+        if isinstance(curve, dict) and curve:
+            try:
+                start = float(curve.get("start", 0))
+                middle = float(curve.get("middle", 0))
+                end = float(curve.get("end", 0))
+                parts.append(f"    情绪弧: 起始({start:.1f}) → 中段({middle:.1f}) → 结尾({end:.1f})")
+            except (TypeError, ValueError):
+                pass
+        elif isinstance(curve, list) and curve:
+            parts.append(f"    情绪弧: {' → '.join(str(x) for x in curve)}")
+
+        tone = analysis.get("emotional_tone")
+        intensity = analysis.get("emotional_intensity")
+        if tone or intensity is not None:
+            tone_str = str(tone) if tone else ""
+            intensity_str = f"({intensity:.1f})" if intensity is not None else ""
+            if tone_str or intensity_str:
+                parts.append(f"    主调情感: {tone_str} {intensity_str}".rstrip())
+
+        # 2) 钩子 (PlotAnalysis.hooks) - [{type, content, strength, position}]
+        hooks = analysis.get("hooks") or []
+        if hooks and isinstance(hooks, list):
+            hook_lines = []
+            for h in hooks[:5]:
+                if isinstance(h, dict):
+                    h_type = h.get("type", "")
+                    h_content = str(h.get("content", ""))[:40]
+                    h_strength = h.get("strength")
+                    h_position = h.get("position", "")
+                    s = f"[{h_type}"
+                    if h_strength is not None:
+                        s += f"/强度{h_strength}"
+                    if h_position:
+                        s += f"/{h_position}"
+                    s += f"] {h_content}"
+                    hook_lines.append(s)
+                else:
+                    hook_lines.append(str(h)[:60])
+            if hook_lines:
+                parts.append("    钩子: " + " | ".join(hook_lines))
+
+        # 3) 伏笔摘要 (PlotAnalysis.foreshadows)
+        foreshadows = analysis.get("foreshadows") or []
+        if foreshadows and isinstance(foreshadows, list):
+            planted = sum(1 for f in foreshadows if isinstance(f, dict) and f.get("type") == "planted")
+            resolved = sum(1 for f in foreshadows if isinstance(f, dict) and f.get("type") == "resolved")
+            parts.append(f"    伏笔进度: 本章埋{planted}个 / 收{resolved}个 / 共{len(foreshadows)}条")
+
+        # 4) 场景 (PlotAnalysis.scenes) - [{location, atmosphere, duration}]
+        scenes = analysis.get("scenes") or []
+        if scenes and isinstance(scenes, list):
+            scene_parts = []
+            for s in scenes[:3]:
+                if isinstance(s, dict):
+                    loc = s.get("location", "")
+                    atm = s.get("atmosphere", "")
+                    dur = s.get("duration", "")
+                    desc = loc
+                    if atm:
+                        desc += f"({atm})"
+                    if dur:
+                        desc += f" {dur}"
+                    scene_parts.append(desc)
+                else:
+                    scene_parts.append(str(s)[:30])
+            if scene_parts:
+                parts.append("    场景: " + " → ".join(scene_parts))
+
+        # 5) 节奏 + 冲突
+        pacing = analysis.get("pacing")
+        conflict_level = analysis.get("conflict_level")
+        conflict_types = analysis.get("conflict_types") or []
+        if pacing or conflict_level is not None or conflict_types:
+            bits = []
+            if pacing:
+                bits.append(f"节奏={pacing}")
+            if conflict_level is not None:
+                bits.append(f"冲突强度={conflict_level}/10")
+            if conflict_types:
+                bits.append(f"类型={'/'.join(str(t) for t in conflict_types)}")
+            parts.append("    " + " | ".join(bits))
+
+        # 6) 角色状态 (PlotAnalysis.character_states)
+        char_states = analysis.get("character_states") or []
+        if char_states and isinstance(char_states, list):
+            cs_lines = []
+            for cs in char_states[:5]:
+                if isinstance(cs, dict):
+                    name = cs.get("character_name", "")
+                    before = cs.get("state_before", "")
+                    after = cs.get("state_after", "")
+                    if name and (before or after):
+                        cs_lines.append(f"{name}: {before or '—'} → {after or '—'}")
+            if cs_lines:
+                parts.append("    角色状态: " + " | ".join(cs_lines))
+
+        # 7) 质量分
+        quality_bits = []
+        overall = analysis.get("overall_quality_score")
+        anchor_score = analysis.get("anchor_compliance_score")
+        if overall is not None:
+            quality_bits.append(f"overall={overall:.1f}")
+        if anchor_score is not None:
+            quality_bits.append(f"锚点合规={anchor_score:.1f}")
+        if quality_bits:
+            parts.append("    评分: " + " / ".join(quality_bits))
+
+        # 8) 改进建议
+        suggestions = analysis.get("suggestions") or []
+        if suggestions and isinstance(suggestions, list):
+            sug_strs = []
+            for s in suggestions[:3]:
+                if isinstance(s, str):
+                    sug_strs.append(s[:60])
+                elif isinstance(s, dict):
+                    sug_strs.append(str(s.get("content") or s.get("text") or ""))[:60]
+            if sug_strs:
+                parts.append("    改进建议: " + " | ".join(sug_strs))
+
+        if not parts:
+            return ""
+        return "\n".join(parts)
+
     def _format_memories(
         self,
         relevant: List[Dict[str, Any]],

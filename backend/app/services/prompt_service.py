@@ -786,8 +786,8 @@ class PromptService:
 {chapter_outline}
 </outline>
 
-<recent_context priority="P1">
-【最近章节规划 - 故事脉络参考】
+<recent_context priority="P0">
+【最近章节结构化快照 - 含上一章情节点/情绪弧/钩子/伏笔/场景/节奏/角色状态/评分/改进建议】
 {recent_chapters_context}
 </recent_context>
 
