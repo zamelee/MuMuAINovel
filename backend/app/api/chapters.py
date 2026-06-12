@@ -1933,6 +1933,19 @@ async def generate_chapter_content_stream(
         except Exception as e:
             logger.error(f"流式创作章节失败: {str(e)}")
             if db_session and not db_committed:
+                # === Batch 2 钩子: 保存场景状态 (SceneStateTracker) ===
+                try:
+                    from app.services.scene_state_extractor import save_scene_state
+                    await save_scene_state(
+                        db=db_session,
+                        chapter_id=chapter_id,
+                        project_id=project.id,
+                        chapter_number=current_chapter.chapter_number,
+                        chapter_content=full_content,
+                    )
+                except Exception as ss_e:
+                    logger.warning("[scene_state] save failed (stream): " + str(ss_e))
+
                 try:
                     if db_session.in_transaction():
                         await db_session.rollback()
@@ -2393,6 +2406,19 @@ async def _run_chapter_generation_bg(
             task_id=analysis_task.id
         )
     )
+    # === Batch 2 钩子: 保存场景状态 (SceneStateTracker) ===
+    try:
+        from app.services.scene_state_extractor import save_scene_state
+        await save_scene_state(
+            db=db,
+            chapter_id=chapter_id,
+            project_id=current_chapter.project_id,
+            chapter_number=current_chapter.chapter_number,
+            chapter_content=full_content,
+        )
+    except Exception as ss_e:
+        logger.warning("[scene_state] save failed (background): " + str(ss_e))
+
 
     # === 完成 ===
     await tracker.complete(f"创作完成！共 {new_word_count} 字")
@@ -2867,6 +2893,19 @@ async def _run_chapter_generation_bg(
     await db.refresh(analysis_task)
 
     logger.info(f"📋 后台生成：已创建分析任务: {analysis_task.id}")
+    # === Batch 2 钩子: 保存场景状态 (SceneStateTracker) ===
+    try:
+        from app.services.scene_state_extractor import save_scene_state
+        await save_scene_state(
+            db=db,
+            chapter_id=chapter_id,
+            project_id=current_chapter.project_id,
+            chapter_number=current_chapter.chapter_number,
+            chapter_content=full_content,
+        )
+    except Exception as ss_e:
+        logger.warning("[scene_state] save failed (legacy): " + str(ss_e))
+
 
     await asyncio.sleep(0.05)
 
@@ -4679,6 +4718,18 @@ async def regenerate_chapter_stream(
                 )
                 if recent_ctx:
                     previous_context_parts.append(recent_ctx)
+                # === Batch 2 注入: 上一章场景状态 (SceneStateTracker) ===
+                try:
+                    from app.services.scene_state_extractor import get_previous_scene_state, format_scene_state_block
+                    if prev_chapter:
+                        prev_state = await get_previous_scene_state(temp_db, prev_chapter.id)
+                        if prev_state:
+                            block = format_scene_state_block(prev_state)
+                            if block:
+                                previous_context_parts.append(block)
+                                logger.info("[scene_state] inject prev state: loc=" + str(prev_state.get("location")) + " present=" + str(len(prev_state.get("characters_present", []))) + " left=" + str(len(prev_state.get("characters_left", []))))
+                except Exception as ss_e:
+                    logger.warning("[scene_state] load prev state failed: " + str(ss_e))
             except Exception as ctx_e:
                 logger.warning(f'构建前置章节上下文失败: {ctx_e}')
             previous_context_str = '\n\n'.join(previous_context_parts) if previous_context_parts else ''

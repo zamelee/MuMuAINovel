@@ -200,3 +200,34 @@ class PlotAnalysis(Base):
             "description_ratio": self.description_ratio or 0.0,
             "created_at": self.created_at.isoformat() if self.created_at else None
         }
+
+
+# Batch 2: 章节场景状态表 (Scene State)
+# 记录每章结束时的物理事实快照（地点 / 角色在场性 / 物品 / 知识状态）
+# 用于下一章生成时 P0 注入，防止"上一章已离开的人还在场"型 bug
+
+class ChapterSceneState(Base):
+    __tablename__ = "chapter_scene_states"
+
+    id = Column(String(36), primary_key=True, default=lambda: str(uuid.uuid4()))
+    project_id = Column(String(36), ForeignKey("projects.id", ondelete="CASCADE"), nullable=False, index=True)
+    chapter_id = Column(String(36), ForeignKey("chapters.id", ondelete="CASCADE"), nullable=False, unique=True, index=True)
+    chapter_number = Column(Integer, nullable=False, index=True)
+
+    # 物理状态字段
+    location = Column(String(200), nullable=True, comment="当前场景地点")
+    characters_present = Column(JSON, nullable=True, comment="在场角色列表: [{name, position, last_seen_para}]")
+    characters_left = Column(JSON, nullable=True, comment="已离开角色列表: [{name, last_action, last_seen_para}]")
+    characters_entered = Column(JSON, nullable=True, comment="中途进入角色列表: [{name, enter_method, first_seen_para}]")
+    items = Column(JSON, nullable=True, comment="物品列表: [{name, state, owner}]")
+    knowledge_states = Column(JSON, nullable=True, comment="知识状态: [{character, knows_about, since_chapter}]")
+
+    # 提取质量
+    confidence = Column(Float, default=0.5, comment="提取可信度 0.0-1.0")
+    extractor_version = Column(String(20), default="v1", comment="规则版本号")
+
+    created_at = Column(DateTime, server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now(), nullable=False)
+
+    def __repr__(self):
+        return f"<ChapterSceneState(chapter_number={self.chapter_number}, location={self.location})>"

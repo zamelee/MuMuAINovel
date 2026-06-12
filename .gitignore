@@ -125,3 +125,9 @@ backend/embedding/
 backend/.instance_id
 test.json
 MuMuAINovel.exe
+
+# LLM 副本目录 (按用户约定: 改动前 cp 到 backups/pre-batch-N-YYYYMMDD/)
+backups/
+
+# 续接交接文档 (LLM 内部交接用, 不进版本库)
+HANDOFF.md

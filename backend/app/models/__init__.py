@@ -8,7 +8,7 @@ from app.models.generation_history import GenerationHistory
 from app.models.analysis_task import AnalysisTask
 from app.models.batch_generation_task import BatchGenerationTask
 from app.models.settings import Settings
-from app.models.memory import StoryMemory, PlotAnalysis
+from app.models.memory import StoryMemory, PlotAnalysis, ChapterSceneState
 from app.models.writing_style import WritingStyle
 from app.models.project_default_style import ProjectDefaultStyle
 from app.models.mcp_plugin import MCPPlugin
@@ -36,6 +36,7 @@ __all__ = [
     "Settings",
     "StoryMemory",
     "PlotAnalysis",
+    "ChapterSceneState",
     "WritingStyle",
     "ProjectDefaultStyle",
     "MCPPlugin",
