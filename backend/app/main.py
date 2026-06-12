@@ -104,8 +104,20 @@ async def lifespan(app: FastAPI):
         pass
 
     logger.info("应用启动完成")
-    
+
+    # 启动孤儿任务定期清理
+    import asyncio
+    _cleanup_task = asyncio.create_task(_orphan_cleanup_loop())
+    logger.info("🧹 孤儿任务清理已启动（每 10 分钟）")
+
     yield
+
+    # 取消清理任务
+    _cleanup_task.cancel()
+    try:
+        await _cleanup_task
+    except (asyncio.CancelledError, Exception):
+        pass
     
     # 清理MCP插件
     await mcp_client.cleanup()
@@ -118,6 +130,65 @@ async def lifespan(app: FastAPI):
     await close_db()
     
     logger.info("应用已关闭")
+
+
+
+
+
+async def _cleanup_orphan_analysis_tasks():
+    """定期清理孤儿分析任务（创建超过 30 分钟仍 pending 的任务）
+
+    孤儿产生原因：生成流程创建 AnalysisTask 后崩溃，或用户从不启动分析。
+    这些任务如果永远 pending 会让前端误以为"分析中"，所以定期清理为 cancelled。
+    """
+    try:
+        from app.models.analysis_task import AnalysisTask
+        from app.models.chapter import Chapter
+        from sqlalchemy import select, update
+        from datetime import datetime, timedelta
+        from app.database import get_engine
+        from sqlalchemy.ext.asyncio import async_sessionmaker, AsyncSession
+
+        engine = await get_engine("system")
+        AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+        threshold = datetime.now() - timedelta(minutes=30)
+
+        async with AsyncSessionLocal() as db:
+            stmt = select(AnalysisTask).where(
+                AnalysisTask.status == "pending",
+                AnalysisTask.created_at < threshold
+            )
+            result = await db.execute(stmt)
+            orphans = result.scalars().all()
+            if not orphans:
+                return
+
+            ids = [o.id for o in orphans]
+            upd = (
+                update(AnalysisTask)
+                .where(AnalysisTask.id.in_(ids))
+                .values(
+                    status="cancelled",
+                    error_message="孤儿任务：创建超过 30 分钟未启动，已自动清理",
+                    completed_at=datetime.now(),
+                )
+            )
+            await db.execute(upd)
+            await db.commit()
+            logger.info(f"🧹 孤儿分析任务清理: {len(orphans)} 个 (ids={ids[:3]}{'...' if len(ids) > 3 else ''})")
+    except Exception as e:
+        logger.warning(f"孤儿分析任务清理失败（非致命）: {e}")
+
+
+async def _orphan_cleanup_loop():
+    """每 10 分钟跑一次孤儿清理"""
+    import asyncio
+    while True:
+        try:
+            await _cleanup_orphan_analysis_tasks()
+        except Exception as e:
+            logger.warning(f"孤儿清理循环异常（非致命）: {e}")
+        await asyncio.sleep(600)
 
 
 app = FastAPI(

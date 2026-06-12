@@ -1,4 +1,4 @@
-﻿"""章节上下文构建服务 - 实现RTCO框架的智能上下文构建"""
+"""章节上下文构建服务 - 实现RTCO框架的智能上下文构建"""
 
 from dataclasses import dataclass, field
 from typing import Dict, Any, Optional, List
@@ -11,7 +11,7 @@ from app.models.project import Project
 from app.models.outline import Outline
 from app.models.character import Character
 from app.models.career import Career, CharacterCareer
-from app.models.memory import StoryMemory
+from app.models.memory import StoryMemory, PlotAnalysis
 from app.models.foreshadow import Foreshadow
 from app.models.relationship import CharacterRelationship, Organization, OrganizationMember
 from app.logger import get_logger
@@ -643,26 +643,60 @@ class OneToManyContextBuilder:
         project_id: str,
         db: AsyncSession
     ) -> Optional[str]:
-        """构建最近10章的expansion_plan摘要"""
+        """构建最近10章上下文（三段式回退：分析摘要 → 大纲规划 → 生成摘要）"""
         try:
             result = await db.execute(
-                select(Chapter.chapter_number, Chapter.title, Chapter.expansion_plan, Chapter.summary)
+                select(Chapter.id, Chapter.chapter_number, Chapter.title, Chapter.expansion_plan, Chapter.summary)
                 .where(Chapter.project_id == project_id)
                 .where(Chapter.chapter_number < chapter.chapter_number)
                 .order_by(Chapter.chapter_number.desc())
                 .limit(self.RECENT_CHAPTERS_COUNT)
             )
             recent_chapters = result.all()
-            
+
             if not recent_chapters:
                 return None
-            
-            # 按章节号正序排列
-            recent_chapters = sorted(recent_chapters, key=lambda x: x[0])
-            
-            lines = ["【最近章节规划】"]
-            for ch_num, ch_title, expansion_plan, summary in recent_chapters:
-                if expansion_plan:
+
+            recent_chapters = sorted(recent_chapters, key=lambda x: x[1])
+
+            chapter_ids = [row[0] for row in recent_chapters]
+            summary_map: Dict[str, str] = {}
+            analysis_map: Dict[str, Any] = {}
+            if chapter_ids:
+                summary_result = await db.execute(
+                    select(StoryMemory.chapter_id, StoryMemory.content)
+                    .where(StoryMemory.chapter_id.in_(chapter_ids))
+                    .where(StoryMemory.memory_type == 'chapter_summary')
+                )
+                summary_map = {chapter_id: content for chapter_id, content in summary_result.all()}
+
+                analysis_result = await db.execute(
+                    select(PlotAnalysis.chapter_id, PlotAnalysis.plot_points, PlotAnalysis.character_states)
+                    .where(PlotAnalysis.chapter_id.in_(chapter_ids))
+                )
+                analysis_map = {
+                    chapter_id: {"plot_points": plot_points or [], "character_states": character_states or []}
+                    for chapter_id, plot_points, character_states in analysis_result.all()
+                }
+
+            lines = ["【最近章节脉络】"]
+            for ch_id, ch_num, ch_title, expansion_plan, summary in recent_chapters:
+                real_summary = summary_map.get(ch_id)
+                analysis = analysis_map.get(ch_id)
+                if real_summary:
+                    line = f"第{ch_num}章《{ch_title}》：{real_summary[:180]}"
+                    if analysis and analysis.get("plot_points"):
+                        points = []
+                        for point in analysis["plot_points"][:3]:
+                            if isinstance(point, dict):
+                                points.append(str(point.get("content") or ""))
+                            else:
+                                points.append(str(point))
+                        points = [p for p in points if p]
+                        if points:
+                            line += f"（真实情节点：{'；'.join(points)}）"
+                    lines.append(line)
+                elif expansion_plan:
                     try:
                         plan = json.loads(expansion_plan)
                         plot_summary = plan.get('plot_summary', '')
@@ -677,10 +711,10 @@ class OneToManyContextBuilder:
                             lines.append(f"第{ch_num}章《{ch_title}》：{summary[:100]}")
                 elif summary:
                     lines.append(f"第{ch_num}章《{ch_title}》：{summary[:100]}")
-            
+
             if len(lines) <= 1:
                 return None
-            
+
             return "\n".join(lines)
         except Exception as e:
             logger.error(f"❌ 构建最近章节上下文失败: {str(e)}")

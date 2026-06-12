@@ -3258,7 +3258,6 @@ async def start_chapter_analysis(
     # user_id from request state (consistent with rest of codebase)
 ):
     """启动已创建的pending分析任务（由前端倒计时或手动触发）"""
-    from app.database import get_db_write_lock
     user_id = getattr(request.state, "user_id", "system")
 
     # 查找pending任务
@@ -4639,6 +4638,54 @@ async def regenerate_chapter_stream(
             else:
                 logger.info("ℹ️ 未指定写作风格，使用默认提示词")
             
+            # 重新生成专用：构建前置章节上下文（Plan 1）
+            previous_context_parts = []
+            try:
+                if chapter.chapter_number and chapter.chapter_number > 1:
+                    prev_q = await temp_db.execute(
+                        select(Chapter)
+                        .where(Chapter.project_id == chapter.project_id)
+                        .where(Chapter.chapter_number == chapter.chapter_number - 1)
+                        .order_by(Chapter.created_at.desc())
+                        .limit(1)
+                    )
+                    prev_chapter = prev_q.scalar_one_or_none()
+                    if prev_chapter:
+                        prev_content = prev_chapter.content or ''
+                        if prev_content:
+                            tail = prev_content[-500:] if len(prev_content) > 500 else prev_content
+                            previous_context_parts.append('【上一章末尾500字】\n' + tail)
+                        prev_end_anchor = getattr(prev_chapter, 'end_anchor', None)
+                        if prev_end_anchor:
+                            previous_context_parts.append('【上一章结束锚点】\n' + prev_end_anchor)
+                        try:
+                            sum_q = await temp_db.execute(
+                                select(StoryMemory.content)
+                                .where(StoryMemory.chapter_id == prev_chapter.id, StoryMemory.memory_type == 'chapter_summary')
+                                .order_by(StoryMemory.created_at.desc())
+                                .limit(1)
+                            )
+                            prev_summary = sum_q.scalar_one_or_none()
+                            if prev_summary:
+                                previous_context_parts.append('【上一章摘要】\n' + prev_summary)
+                        except Exception as sum_e:
+                            logger.warning(f'获取上一章摘要失败: {sum_e}')
+                from app.services.chapter_context_service import OneToManyContextBuilder
+                recent_builder = OneToManyContextBuilder(memory_service=memory_service)
+                recent_ctx = await recent_builder._build_recent_chapters_context(
+                    chapter=chapter,
+                    project_id=chapter.project_id,
+                    db=temp_db
+                )
+                if recent_ctx:
+                    previous_context_parts.append(recent_ctx)
+            except Exception as ctx_e:
+                logger.warning(f'构建前置章节上下文失败: {ctx_e}')
+            previous_context_str = '\n\n'.join(previous_context_parts) if previous_context_parts else ''
+
+            # 当前章节结束锚点（Plan 2）
+            chapter_end_anchor = getattr(chapter, 'end_anchor', None) or ''
+
             # 构建项目上下文
             project_context = {
                 'project_title': project.title if project else '未知',
@@ -4650,7 +4697,8 @@ async def regenerate_chapter_stream(
                 'atmosphere': project.world_atmosphere if project else '未设定',
                 'characters_info': characters_info_with_careers,
                 'chapter_outline': outline.content if outline else chapter.summary or '暂无大纲',
-                'previous_context': ''  # 可以后续扩展添加前置章节上下文
+                'previous_context': previous_context_str,
+                'end_anchor': chapter_end_anchor,
             }
         finally:
             await temp_db.close()

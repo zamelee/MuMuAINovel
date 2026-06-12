@@ -2658,7 +2658,18 @@ class PromptService:
             system_template = cls.CHAPTER_REGENERATION_SYSTEM
         
         prompt_parts = [system_template]
-        
+
+        # 指令优先级声明（让模型知道修改建议是 P2，锚点是 P0）
+        prompt_parts.append('''## 📌 指令优先级（请严格遵守）
+
+| 优先级 | 含义 | 包含内容 |
+|---|---|---|
+| **P0 硬约束** | 绝不违反 | 结束锚点、已发生事实、continuation_point、角色存活状态 |
+| P1 必须遵守 | 不可省略 | 章节大纲、关键事件、角色信息、写作风格 |
+| P2 建议改进 | 尽力体现 | 分析建议、用户自定义修改意见、重点优化方向 |
+
+⚠️ **重要**：当你认为某条修改建议会与 P0 约束冲突时，**P0 优先**，并在该建议维度尽量小幅调整而非整体推翻。\n''')
+
         # 原始章节信息
         prompt_parts.append(f"""## 📖 原始章节信息
 
@@ -2729,6 +2740,21 @@ class PromptService:
 ---
 """)
         
+        # 结束锚点硬约束（P0）
+        end_anchor = project_context.get('end_anchor') if isinstance(project_context, dict) else None
+        if end_anchor:
+            prompt_parts.append(f"""## 🔴 结束锚点（必须严格遵守）
+
+本章最后一个镜头必须且只能定格在：
+
+> {end_anchor}
+
+严禁写到该画面之后的内容。不需要完成事件弧，不需要让角色离开场景。
+
+如果修改建议与该锚点冲突，**以锚点为准**。\n
+---\n
+""")
+
         # 创作要求
         prompt_parts.append(f"""## ✨ 创作要求
 

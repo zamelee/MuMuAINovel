@@ -207,8 +207,9 @@ const fetchAnalysisStatus = async () => {
         throw new Error(errorData.detail || '触发分析失败');
       }
 
-      // 触发成功后立即关闭Modal，让父组件的状态管理接管
-      onClose();
+      // 触发成功后留在 Modal 内，让本组件的 fetchAnalysisStatus 接管进度展示
+      await fetchAnalysisStatus();
+      startPolling();
     } catch (err) {
       setError((err as Error).message);
     } finally {
