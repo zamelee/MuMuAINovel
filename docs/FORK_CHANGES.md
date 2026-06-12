@@ -169,3 +169,88 @@
 
 \ackend/app/services/ai_service.py\
 - 新增 think-tag 状态机过滤器，处理跨 chunk 的 \\...\\ 内容
+
+---
+
+## 十、本次会话修复与功能扩展 (commits 8781941..70a3b94)
+
+本节补充会话期间针对结束锚点系统做的进一步修复、状态机简化、UI 改进。
+
+### 10.1 端到端功能扩展 (`8781941`)
+
+#### 后端
+
+- `backend/app/api/chapters.py` — `regenerate_chapter_stream` 注入前置章节上下文:
+  - 上一章末尾 500 字 (仅 `chapter_number > 1`)
+  - 上一章的 `end_anchor`
+  - 上一章的 `chapter_summary` (从 `StoryMemory.memory_type='chapter_summary'` 取)
+  - 最近 10 章脉络 (三段式回退)
+- `backend/app/services/prompt_service.py` — `build_chapter_regeneration_prompt` 增加:
+  - 指令优先级声明表 (P0/P1/P2), 冲突时 P0 优先
+  - 结束锚点硬约束块 (仅 `project_context.end_anchor` 非空时渲染)
+- `backend/app/services/chapter_context_service.py` — `OneToManyContextBuilder._build_recent_chapters_context` 重写为三段式回退:
+  1. 真实摘要 `StoryMemory.chapter_summary`
+  2. 分析情节点 `PlotAnalysis.plot_points`
+  3. 规划期 JSON `Chapter.expansion_plan`
+  4. 仍无 → `Chapter.summary` 字段
+- `backend/app/main.py` — 启动 `_orphan_cleanup_loop()` 每 10 分钟跑一次, 把 `pending` 超过 30 分钟的分析任务标记为 `cancelled`
+
+#### 前端
+
+- `frontend/src/components/ChapterAnalysis.tsx` — 触发分析后 **留在 Modal 内**, 由本组件 `fetchAnalysisStatus` 接管进度展示, 不再立刻 `onClose()`
+
+### 10.2 TypeScript 类型补全, tsc 43 → 0 (`e4c1e9e`)
+
+上次 commit 自带 43 条类型错误, vite 仍能跑但 editor 标红。一次性补全:
+
+- `frontend/src/types/index.ts`:
+  - `AnalysisTask.status` 加 `'cancelled'`
+  - `ProjectHealth` 加 `chapters_missing_anchor` / `chapters_missing_anchor_ids`
+  - 新增 `SystemSecuritySettings` / `SystemSecuritySettingsUpdate`
+- `frontend/src/services/api.ts`:
+  - 补 `settingsApi.getSystemSecuritySettings` / `updateSystemSecuritySettings`
+  - `chapterApi.getAnchorScore` 修正 axios 泛型为 `<unknown, ResT>`
+- `frontend/src/pages/Outline.tsx` — `expansion_plans` 数组补 `end_anchor`
+- `frontend/src/pages/SystemSettings.tsx` — 公告管理 Tab 补 key
+- 死代码清理: `Radio`/`InputNumber`/`Spin`/3 个 icon/`localStrategy`/`quickCheckResult`
+- `frontend/src/components/ChapterReader.tsx` — 删 `if(!chapter)` 块内访问 `end_anchor` 的死代码
+- `frontend/src/components/ChapterAnalysis.tsx` — `renderProgress` 早 return 收窄改宽松以保留 `failed`/`cancelled`
+
+### 10.3 倒计时按钮 disabled bug 修复 (`f8c6de5`)
+
+**症状**: 自动分析模式, 倒计时期间鼠标放上去 tooltip 显示 "点击取消自动分析", 但按钮点不动。
+
+**根因**:
+
+1. `isAnalyzing` 把 `'pending'` 当作分析中 → `disabled={!hasContent || isAnalyzing}` 永远 true
+2. AI 创作完成时乐观写入 `analysisTasksMap[id].status = 'pending'`, 倒计时期间一直存在
+
+**修复**: 4 处按钮统一改 `disabled` / `loading` / `icon` / 文字。倒计时时: 文字 "取消", icon 红色 ×, 可点。
+
+### 10.4 根因修复 + 简化 (`2877197`)
+
+承接 10.3 的修复, 这次从设计上根除: **不在** `analysisTasksMap` 乐观写入 pending task, `isAnalyzing` 改定义为 `task?.status === 'running'`。倒计时期间前端对 task 一无所知, 按钮永远可点。
+
+`cancelChapterCountdown` 同步清理本地 pending task 的代码随之删除 (因为根本没写)。
+
+### 10.5 阅读面板结束锚点编辑 (`70a3b94`)
+
+`ChapterReader.tsx` PlanPanel 内部增加结束锚点编辑能力:
+
+- `InfoBlock` 公共组件加 `actions?: React.ReactNode` 可选 prop (title 行 Space-between)
+- PlanPanel 内部 state: `localEndAnchor` / `editingAnchor` / `anchorDraft` / `refillingAnchor` / `savingAnchor`
+- 三态 UI: 编辑中 (textarea + 保存/取消) / 已设置 (文本 + 重新生成/编辑 icon) / 未设置 (灰色提示 + AI 生成)
+- API: `POST /fill-anchor` / `PUT /api/chapters/{id}` (body `{end_anchor: next || null}`)
+
+### 10.6 全局规则 (`840a0d3`)
+
+新增 `AGENTS.md` — **PowerShell 改编程文件的全局禁令**。详见 `AGENTS.md`。
+
+### 10.7 验证状态
+
+- `tsc --noEmit`: 0 错误
+- 后端 4 个修改模块 `importlib` smoke 全部 OK
+- Git working tree 干净
+- 共 7 个 commit 在 origin/main 之前 (待 push)
+
+详见 `docs/END_ANCHOR_SYSTEM.md` (本会话完整系统说明)。
