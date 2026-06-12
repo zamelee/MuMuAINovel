@@ -899,6 +899,14 @@ export default function Chapters() {
       delete countdownIntervalsRef.current[chapterId];
     }
     setChapterCountdowns(prev => { const next = { ...prev }; delete next[chapterId]; return next; });
+    // 取消倒计时时同步清理本地的 pending task 状态，否则按钮会卡在 disabled 状态
+    setAnalysisTasksMap(prev => {
+      const task = prev[chapterId];
+      if (!task || task.status !== 'pending') return prev;
+      const next = { ...prev };
+      delete next[chapterId];
+      return next;
+    });
   };
 
   const startChapterCountdown = (chapterId: string) => {
@@ -2233,16 +2241,16 @@ export default function Chapters() {
                       <Tooltip title={isCountingDown ? '点击取消自动分析' : (!hasContent ? '请先生成章节内容' : isAnalyzing ? '分析进行中，请稍候...' : '')}>
                       <Button
                         type="text"
-                        icon={isAnalyzing ? <SyncOutlined spin /> : <FundOutlined />}
+                        icon={isAnalyzing && !isCountingDown ? <SyncOutlined spin /> : isCountingDown ? <CloseCircleOutlined /> : <FundOutlined />}
                         onClick={() => {
                           if (isCountingDown) { cancelChapterCountdown(item.id); }
                           else { handleShowAnalysis(item.id); }
                         }}
-                        disabled={!hasContent || isAnalyzing}
-                        loading={isAnalyzing}
+                        disabled={!hasContent || (isAnalyzing && !isCountingDown)}
+                        loading={isAnalyzing && !isCountingDown}
                         style={isCountingDown ? { color: token.colorWarning, fontWeight: 'bold' } : undefined}
                       >
-                      {isCountingDown ? `${countdown}s后分析` : (isAnalyzing ? '分析中' : '分析')}
+                      {isCountingDown ? '取消' : (isAnalyzing ? '分析中' : '分析')}
                       </Button>
                       </Tooltip>
                     );
@@ -2322,17 +2330,17 @@ return (
   <Tooltip title={isCountingDown ? '点击取消自动分析' : (!hasContent ? '请先生成章节内容' : isAnalyzing ? '分析中' : '')}>
   <Button
     type="text"
-    icon={isAnalyzing ? <SyncOutlined spin /> : <FundOutlined />}
+    icon={isAnalyzing && !isCountingDown ? <SyncOutlined spin /> : isCountingDown ? <CloseCircleOutlined /> : <FundOutlined />}
     onClick={() => {
       if (isCountingDown) { cancelChapterCountdown(item.id); }
       else { handleShowAnalysis(item.id); }
     }}
     size="small"
-    disabled={!hasContent || isAnalyzing}
-    loading={isAnalyzing}
+    disabled={!hasContent || (isAnalyzing && !isCountingDown)}
+    loading={isAnalyzing && !isCountingDown}
     style={isCountingDown ? { color: token.colorWarning, fontWeight: 'bold' } : undefined}
   >
-  {isCountingDown ? `${countdown}s` : ''}
+  {isCountingDown ? '取消' : ''}
   </Button>
   </Tooltip>
 );
@@ -2427,16 +2435,16 @@ return (
   <Tooltip title={isCountingDown ? '点击取消自动分析' : (!hasContent ? '请先生成章节内容' : isAnalyzing ? '分析进行中，请稍候...' : '')}>
   <Button
     type="text"
-    icon={isAnalyzing ? <SyncOutlined spin /> : <FundOutlined />}
+    icon={isAnalyzing && !isCountingDown ? <SyncOutlined spin /> : isCountingDown ? <CloseCircleOutlined /> : <FundOutlined />}
     onClick={() => {
       if (isCountingDown) { cancelChapterCountdown(item.id); }
       else { handleShowAnalysis(item.id); }
     }}
-    disabled={!hasContent || isAnalyzing}
-    loading={isAnalyzing}
+    disabled={!hasContent || (isAnalyzing && !isCountingDown)}
+    loading={isAnalyzing && !isCountingDown}
     style={isCountingDown ? { color: token.colorWarning, fontWeight: 'bold' } : undefined}
   >
-  {isCountingDown ? `${countdown}s后分析` : (isAnalyzing ? '分析中' : '分析')}
+  {isCountingDown ? '取消' : (isAnalyzing ? '分析中' : '分析')}
   </Button>
   </Tooltip>
 );
@@ -2555,17 +2563,17 @@ return (
   <Tooltip title={isCountingDown ? '点击取消自动分析' : (!hasContent ? '请先生成章节内容' : isAnalyzing ? '分析中' : '')}>
   <Button
     type="text"
-    icon={isAnalyzing ? <SyncOutlined spin /> : <FundOutlined />}
+    icon={isAnalyzing && !isCountingDown ? <SyncOutlined spin /> : isCountingDown ? <CloseCircleOutlined /> : <FundOutlined />}
     onClick={() => {
       if (isCountingDown) { cancelChapterCountdown(item.id); }
       else { handleShowAnalysis(item.id); }
     }}
     size="small"
-    disabled={!hasContent || isAnalyzing}
-    loading={isAnalyzing}
+    disabled={!hasContent || (isAnalyzing && !isCountingDown)}
+    loading={isAnalyzing && !isCountingDown}
     style={isCountingDown ? { color: token.colorWarning, fontWeight: 'bold' } : undefined}
   >
-  {isCountingDown ? `${countdown}s` : ''}
+  {isCountingDown ? '取消' : ''}
   </Button>
   </Tooltip>
 );
