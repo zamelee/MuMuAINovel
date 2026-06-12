@@ -899,14 +899,9 @@ export default function Chapters() {
       delete countdownIntervalsRef.current[chapterId];
     }
     setChapterCountdowns(prev => { const next = { ...prev }; delete next[chapterId]; return next; });
-    // 取消倒计时时同步清理本地的 pending task 状态，否则按钮会卡在 disabled 状态
-    setAnalysisTasksMap(prev => {
-      const task = prev[chapterId];
-      if (!task || task.status !== 'pending') return prev;
-      const next = { ...prev };
-      delete next[chapterId];
-      return next;
-    });
+    // 注意：analysisTasksMap 不再需要在这里清理本地 pending task ——
+    // 因为我们不在倒计时开始时把 task 写进 analysisTasksMap。
+    // 后端那个 pending task 由 30 分钟孤儿清理回收。
   };
 
   const startChapterCountdown = (chapterId: string) => {
@@ -976,26 +971,19 @@ export default function Chapters() {
         selectedSkillKey  // 传递选中的Skill
       );
 
-      // 如果返回了分析任务ID
+      // 后端已经创建了 analysis_task（result.analysis_task_id），但本地的
+      // analysisTasksMap 不要在这里就乐观写入。理由：
+      //   - autoAnalysisEnabled=true  → 倒计时结束才调 chapterApi.startAnalysis，
+      //     启动后由 startPollingTask 把 task 状态从后端拉进来即可。
+      //   - autoAnalysisEnabled=false → 用户没确认要做分析，前端不该显示
+      //     'isAnalyzing=true'，后端 task 由孤儿清理回收。
+      // 这样按钮的 isAnalyzing 判断只反映后端真实状态 'running'，
+      // 倒计时期间按钮不会被错误地 disable。
       if (result?.analysis_task_id) {
-        const taskId = result.analysis_task_id;
-        setAnalysisTasksMap(prev => ({
-          ...prev,
-          [editingId]: {
-            has_task: true,
-            task_id: taskId,
-            chapter_id: editingId,
-            status: 'pending',
-            progress: 0
-          }
-        }));
-
         if (autoAnalysisEnabled) {
-          // 启用自动分析 → 启动倒计时，倒计时结束调用 startAnalysis
           message.success('AI创作成功！' + autoAnalysisDelay + '秒后自动开始分析');
           startChapterCountdown(editingId);
         } else {
-          // 未启用自动分析 → 只提示，不启动分析
           message.success('AI创作成功！初步检测已完成，可手动启动LLM分析');
         }
       } else {
@@ -2233,7 +2221,7 @@ export default function Chapters() {
                   (() => {
                     const task = analysisTasksMap[item.id];
                     const countdown = chapterCountdowns[item.id];
-                    const isAnalyzing = task && (task.status === 'pending' || task.status === 'running');
+                    const isAnalyzing = task?.status === 'running';
                     const hasContent = item.content && item.content.trim() !== '';
                     const isCountingDown = countdown !== undefined && countdown > 0;
 
@@ -2241,13 +2229,13 @@ export default function Chapters() {
                       <Tooltip title={isCountingDown ? '点击取消自动分析' : (!hasContent ? '请先生成章节内容' : isAnalyzing ? '分析进行中，请稍候...' : '')}>
                       <Button
                         type="text"
-                        icon={isAnalyzing && !isCountingDown ? <SyncOutlined spin /> : isCountingDown ? <CloseCircleOutlined /> : <FundOutlined />}
+                        icon={isAnalyzing ? <SyncOutlined spin /> : isCountingDown ? <CloseCircleOutlined /> : <FundOutlined />}
                         onClick={() => {
                           if (isCountingDown) { cancelChapterCountdown(item.id); }
                           else { handleShowAnalysis(item.id); }
                         }}
-                        disabled={!hasContent || (isAnalyzing && !isCountingDown)}
-                        loading={isAnalyzing && !isCountingDown}
+                        disabled={!hasContent || isAnalyzing}
+                        loading={isAnalyzing}
                         style={isCountingDown ? { color: token.colorWarning, fontWeight: 'bold' } : undefined}
                       >
                       {isCountingDown ? '取消' : (isAnalyzing ? '分析中' : '分析')}
@@ -2322,7 +2310,7 @@ export default function Chapters() {
                       {(() => {
                         const task = analysisTasksMap[item.id];
 const countdown = chapterCountdowns[item.id];
-const isAnalyzing = task && (task.status === 'pending' || task.status === 'running');
+const isAnalyzing = task?.status === 'running';
 const hasContent = item.content && item.content.trim() !== '';
 const isCountingDown = countdown !== undefined && countdown > 0;
 
@@ -2330,14 +2318,14 @@ return (
   <Tooltip title={isCountingDown ? '点击取消自动分析' : (!hasContent ? '请先生成章节内容' : isAnalyzing ? '分析中' : '')}>
   <Button
     type="text"
-    icon={isAnalyzing && !isCountingDown ? <SyncOutlined spin /> : isCountingDown ? <CloseCircleOutlined /> : <FundOutlined />}
+    icon={isAnalyzing ? <SyncOutlined spin /> : isCountingDown ? <CloseCircleOutlined /> : <FundOutlined />}
     onClick={() => {
       if (isCountingDown) { cancelChapterCountdown(item.id); }
       else { handleShowAnalysis(item.id); }
     }}
     size="small"
-    disabled={!hasContent || (isAnalyzing && !isCountingDown)}
-    loading={isAnalyzing && !isCountingDown}
+    disabled={!hasContent || isAnalyzing}
+    loading={isAnalyzing}
     style={isCountingDown ? { color: token.colorWarning, fontWeight: 'bold' } : undefined}
   >
   {isCountingDown ? '取消' : ''}
@@ -2427,7 +2415,7 @@ return (
                         (() => {
                           const task = analysisTasksMap[item.id];
 const countdown = chapterCountdowns[item.id];
-const isAnalyzing = task && (task.status === 'pending' || task.status === 'running');
+const isAnalyzing = task?.status === 'running';
 const hasContent = item.content && item.content.trim() !== '';
 const isCountingDown = countdown !== undefined && countdown > 0;
 
@@ -2435,13 +2423,13 @@ return (
   <Tooltip title={isCountingDown ? '点击取消自动分析' : (!hasContent ? '请先生成章节内容' : isAnalyzing ? '分析进行中，请稍候...' : '')}>
   <Button
     type="text"
-    icon={isAnalyzing && !isCountingDown ? <SyncOutlined spin /> : isCountingDown ? <CloseCircleOutlined /> : <FundOutlined />}
+    icon={isAnalyzing ? <SyncOutlined spin /> : isCountingDown ? <CloseCircleOutlined /> : <FundOutlined />}
     onClick={() => {
       if (isCountingDown) { cancelChapterCountdown(item.id); }
       else { handleShowAnalysis(item.id); }
     }}
-    disabled={!hasContent || (isAnalyzing && !isCountingDown)}
-    loading={isAnalyzing && !isCountingDown}
+    disabled={!hasContent || isAnalyzing}
+    loading={isAnalyzing}
     style={isCountingDown ? { color: token.colorWarning, fontWeight: 'bold' } : undefined}
   >
   {isCountingDown ? '取消' : (isAnalyzing ? '分析中' : '分析')}
@@ -2555,7 +2543,7 @@ return (
                             {(() => {
                               const task = analysisTasksMap[item.id];
 const countdown = chapterCountdowns[item.id];
-const isAnalyzing = task && (task.status === 'pending' || task.status === 'running');
+const isAnalyzing = task?.status === 'running';
 const hasContent = item.content && item.content.trim() !== '';
 const isCountingDown = countdown !== undefined && countdown > 0;
 
@@ -2563,14 +2551,14 @@ return (
   <Tooltip title={isCountingDown ? '点击取消自动分析' : (!hasContent ? '请先生成章节内容' : isAnalyzing ? '分析中' : '')}>
   <Button
     type="text"
-    icon={isAnalyzing && !isCountingDown ? <SyncOutlined spin /> : isCountingDown ? <CloseCircleOutlined /> : <FundOutlined />}
+    icon={isAnalyzing ? <SyncOutlined spin /> : isCountingDown ? <CloseCircleOutlined /> : <FundOutlined />}
     onClick={() => {
       if (isCountingDown) { cancelChapterCountdown(item.id); }
       else { handleShowAnalysis(item.id); }
     }}
     size="small"
-    disabled={!hasContent || (isAnalyzing && !isCountingDown)}
-    loading={isAnalyzing && !isCountingDown}
+    disabled={!hasContent || isAnalyzing}
+    loading={isAnalyzing}
     style={isCountingDown ? { color: token.colorWarning, fontWeight: 'bold' } : undefined}
   >
   {isCountingDown ? '取消' : ''}
