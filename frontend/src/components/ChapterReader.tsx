@@ -14,9 +14,11 @@ import {
   Empty,
   Progress,
   Tooltip,
+  Input,
 } from 'antd';
 import {
   LeftOutlined,
+  SyncOutlined,
   RightOutlined,
   SettingOutlined,
   FontSizeOutlined,
@@ -27,6 +29,9 @@ import {
   AimOutlined,
   TeamOutlined,
   OrderedListOutlined,
+  ReloadOutlined,
+  EditOutlined,
+  CheckOutlined,
 } from '@ant-design/icons';
 import type { Chapter, ExpansionPlanData, AnalysisData } from '../types';
 
@@ -784,6 +789,81 @@ function PlanPanel({
     return <Empty description="暂无本章规划" style={{ paddingTop: 48 }} />;
   }
 
+  // 结束锚点编辑状态
+  const [localEndAnchor, setLocalEndAnchor] = useState(chapter.end_anchor || '');
+  const [editingAnchor, setEditingAnchor] = useState(false);
+  const [anchorDraft, setAnchorDraft] = useState(localEndAnchor);
+  const [refillingAnchor, setRefillingAnchor] = useState(false);
+  const [savingAnchor, setSavingAnchor] = useState(false);
+
+  // 当父组件传入的 chapter.end_anchor 变化时同步本地状态
+  useEffect(() => {
+    setLocalEndAnchor(chapter.end_anchor || '');
+    if (!editingAnchor) setAnchorDraft(chapter.end_anchor || '');
+  }, [chapter.end_anchor, editingAnchor]);
+
+  const handleRefillAnchor = async () => {
+    if (!chapter?.id || refillingAnchor) return;
+    setRefillingAnchor(true);
+    try {
+      const res = await fetch(`/api/chapters/${chapter.id}/fill-anchor`, { method: 'POST' });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || 'AI 重新生成失败');
+      }
+      const data = await res.json();
+      if (data.skipped) {
+        message.info(data.reason || '已跳过');
+        return;
+      }
+      if (data.end_anchor) {
+        setLocalEndAnchor(data.end_anchor);
+        setAnchorDraft(data.end_anchor);
+        message.success('结束锚点已重新生成');
+      } else {
+        message.success('结束锚点已更新');
+      }
+    } catch (e) {
+      message.error((e as Error).message || 'AI 重新生成失败');
+    } finally {
+      setRefillingAnchor(false);
+    }
+  };
+
+  const handleStartEditAnchor = () => {
+    setAnchorDraft(localEndAnchor);
+    setEditingAnchor(true);
+  };
+
+  const handleCancelEditAnchor = () => {
+    setEditingAnchor(false);
+    setAnchorDraft(localEndAnchor);
+  };
+
+  const handleSaveAnchor = async () => {
+    if (!chapter?.id || savingAnchor) return;
+    const next = anchorDraft.trim();
+    setSavingAnchor(true);
+    try {
+      const res = await fetch(`/api/chapters/${chapter.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ end_anchor: next || null }),
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || '保存失败');
+      }
+      setLocalEndAnchor(next);
+      setEditingAnchor(false);
+      message.success('结束锚点已保存');
+    } catch (e) {
+      message.error((e as Error).message || '保存失败');
+    } finally {
+      setSavingAnchor(false);
+    }
+  };
+
   const keyEvents = plan?.key_events || [];
   const characters = plan?.character_focus || [];
   const scenes = plan?.scenes || [];
@@ -867,22 +947,97 @@ function PlanPanel({
       )}
 
       {/* 结束锚点 */}
-      {chapter.end_anchor ? (
-        <InfoBlock title="结束锚点" icon={<span>🔚</span>} currentTheme={currentTheme}>
-          <div style={{ fontSize: 12, color: '#1677ff', lineHeight: 1.6 }}>
-            {chapter.end_anchor}
+      {editingAnchor ? (
+        <InfoBlock
+          title="编辑结束锚点"
+          icon={<span>🔚</span>}
+          currentTheme={currentTheme}
+          actions={
+            <>
+              <Button
+                size="small"
+                type="primary"
+                icon={<CheckOutlined />}
+                loading={savingAnchor}
+                onClick={handleSaveAnchor}
+              >
+                保存
+              </Button>
+              <Button
+                size="small"
+                icon={<CloseOutlined />}
+                onClick={handleCancelEditAnchor}
+                disabled={savingAnchor}
+              >
+                取消
+              </Button>
+            </>
+          }
+        >
+          <Input.TextArea
+            value={anchorDraft}
+            onChange={(e) => setAnchorDraft(e.target.value)}
+            autoSize={{ minRows: 2, maxRows: 6 }}
+            placeholder="用一段话描述本章节最后一个镜头/画面，AI 续写时会严格遵守"
+            disabled={savingAnchor}
+            maxLength={500}
+            showCount
+          />
+        </InfoBlock>
+      ) : localEndAnchor ? (
+        <InfoBlock
+          title="结束锚点"
+          icon={<span>🔚</span>}
+          currentTheme={currentTheme}
+          actions={
+            <>
+              <Tooltip title="AI 重新生成（覆盖现有锚点）">
+                <Button
+                  size="small"
+                  type="text"
+                  icon={refillingAnchor ? <SyncOutlined spin /> : <ReloadOutlined />}
+                  loading={refillingAnchor}
+                  onClick={handleRefillAnchor}
+                />
+              </Tooltip>
+              <Tooltip title="手动编辑">
+                <Button
+                  size="small"
+                  type="text"
+                  icon={<EditOutlined />}
+                  onClick={handleStartEditAnchor}
+                />
+              </Tooltip>
+            </>
+          }
+        >
+          <div style={{ fontSize: 12, color: '#1677ff', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>
+            {localEndAnchor}
           </div>
         </InfoBlock>
       ) : (
-        <div style={{
-          padding: '6px 10px',
-          borderRadius: 6,
-          border: '1px dashed ' + currentTheme.border,
-          fontSize: 12,
-          opacity: 0.65,
-        }}>
-          🔚 结束锚点（未设置）
-        </div>
+        <InfoBlock
+          title="结束锚点"
+          icon={<span>🔚</span>}
+          currentTheme={currentTheme}
+          actions={
+            <Tooltip title="AI 自动生成结束锚点">
+              <Button
+                size="small"
+                type="text"
+                icon={refillingAnchor ? <SyncOutlined spin /> : <ReloadOutlined />}
+                loading={refillingAnchor}
+                onClick={handleRefillAnchor}
+              >
+                AI 生成
+              </Button>
+            </Tooltip>
+          }
+        >
+          <div style={{ fontSize: 12, opacity: 0.65, fontStyle: 'italic' }}>
+            暂未设置结束锚点，AI 续写时无法保证镜头定格。建议先补充。
+          </div>
+        </InfoBlock>
       )}
 
       {(characters.length > 0 || plan?.emotional_tone || plan?.conflict_type) && (
@@ -926,11 +1081,13 @@ function InfoBlock({
   title,
   icon,
   currentTheme,
+  actions,
   children,
 }: {
   title: string;
   icon?: React.ReactNode;
   currentTheme: ReaderThemeStyle;
+  actions?: React.ReactNode;
   children: React.ReactNode;
 }) {
   return (
@@ -940,10 +1097,19 @@ function InfoBlock({
       border: `1px solid ${currentTheme.border}`,
       background: currentTheme.mutedBg,
     }}>
-      <Space style={{ marginBottom: 6, fontWeight: 700 }}>
-        {icon}
-        <span>{title}</span>
-      </Space>
+      <div style={{
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'space-between',
+        marginBottom: 6,
+        gap: 8,
+      }}>
+        <Space style={{ fontWeight: 700 }}>
+          {icon}
+          <span>{title}</span>
+        </Space>
+        {actions && <Space size={4} wrap>{actions}</Space>}
+      </div>
       <div style={{ fontSize: 13, opacity: 0.86 }}>{children}</div>
     </div>
   );
