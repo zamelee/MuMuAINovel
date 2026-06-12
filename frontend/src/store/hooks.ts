@@ -324,7 +324,6 @@ export function useChapterSync() {
       let buffer = '';
       let fullContent = '';
       let analysisTaskId: string | undefined;
-      let quickCheckResult: { anchor_score?: number | null; boundary_ok?: boolean; summary?: string } | null = null;
 
       while (true) {
         const { done, value } = await reader.read();

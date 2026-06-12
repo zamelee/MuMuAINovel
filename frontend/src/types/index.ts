@@ -70,6 +70,14 @@ export interface SystemSMTPSettingsUpdate {
   verification_resend_interval_seconds?: number;
 }
 
+export interface SystemSecuritySettings {
+  allow_private_api_url: boolean;
+}
+
+export interface SystemSecuritySettingsUpdate {
+  allow_private_api_url: boolean;
+}
+
 // 设置类型定义
 export interface Settings {
   id: string;
@@ -610,7 +618,7 @@ export interface AnalysisTask {
   has_task: boolean;
   task_id: string | null;
   chapter_id: string;
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'none';
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'cancelled' | 'none';
   progress: number;
   error_message?: string | null;
   auto_recovered?: boolean;
@@ -1244,6 +1252,8 @@ export interface ProjectHealth {
   project_id: string;
   outlines_missing_anchor: number;
   outlines_missing_anchor_ids: HealthIssueItem[];
+  chapters_missing_anchor: number;
+  chapters_missing_anchor_ids: HealthIssueItem[];
   chapters_missing_analysis: number;
   chapters_missing_analysis_ids: HealthIssueItem[];
   chapters_stale_analysis: number;

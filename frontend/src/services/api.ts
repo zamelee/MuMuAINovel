@@ -338,6 +338,12 @@ export const settingsApi = {
 
   testSystemSMTPSettings: (data: { to_email: string }) =>
     api.post<unknown, { success: boolean; message: string }>('/settings/system/smtp/test', data),
+
+  getSystemSecuritySettings: () =>
+    api.get<unknown, import('../types').SystemSecuritySettings>('/settings/system/security'),
+
+  updateSystemSecuritySettings: (data: import('../types').SystemSecuritySettingsUpdate) =>
+    api.put<unknown, import('../types').SystemSecuritySettings>('/settings/system/security', data),
 };
 
 export const projectApi = {
@@ -563,6 +569,7 @@ export const outlineApi = {
           characters: string[];
           purpose: string;
         }> | null;
+        end_anchor?: string | null;
       }> | null;
     }>(`/outlines/${outlineId}/chapters`),
 
@@ -734,7 +741,7 @@ export const chapterApi = {
     api.post<unknown, { compliance_score?: number | null; violation?: string | null; suggestion?: string | null; message?: string }>(`/chapters/${chapterId}/check-anchor`, data || {}),
 
   getAnchorScore: (chapterId: string) =>
-    api.get<{ anchor_compliance_score: number | null; has_analysis: boolean }>(`/chapters/${chapterId}/anchor-score`),
+    api.get<unknown, { anchor_compliance_score: number | null; has_analysis: boolean }>(`/chapters/${chapterId}/anchor-score`),
 
   startAnalysis: (chapterId: string) =>
     api.post<unknown, { message?: string }>(`/chapters/${chapterId}/start-analysis`),

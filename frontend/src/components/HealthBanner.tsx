@@ -1,12 +1,9 @@
 import { useState, useEffect } from 'react';
-import { Alert, Button, Space, Tag, Popconfirm, message, List, Collapse, Spin, theme } from 'antd';
+import { Alert, Button, Space, Tag, Popconfirm, message, List, Collapse, theme } from 'antd';
 import {
   WarningOutlined,
   ToolOutlined,
   ReloadOutlined,
-  CheckCircleOutlined,
-  CloseCircleOutlined,
-  MinusCircleOutlined,
 } from '@ant-design/icons';
 import type { ProjectHealth, FillAnchorResult, BatchFillAnchorsResult } from '../types';
 
@@ -107,7 +104,7 @@ export default function HealthBanner({ projectId, onRefresh }: HealthBannerProps
         <List
           size="small"
           dataSource={health.chapters_missing_anchor_ids}
-          renderItem={(item) => (
+          renderItem={(item: { id: string; title: string }) => (
             <List.Item
               actions={[
                 <Button

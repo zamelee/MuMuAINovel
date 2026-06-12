@@ -711,11 +711,6 @@ function ChapterBrief({
         opacity: 0.55,
       }}>
         {emptyText}
-        {showEndAnchor && chapter?.end_anchor && (
-          <div style={{ marginTop: 8, fontSize: 12, color: "#1677ff", lineHeight: 1.5 }}>
-            🔚 {chapter.end_anchor}
-          </div>
-        )}
       </div>
     );
   }

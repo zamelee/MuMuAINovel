@@ -1099,6 +1099,7 @@ export default function Outline() {
           characters: string[];
           purpose: string;
         }> | null;
+        end_anchor?: string | null;
       }> | null;
     }
   ) => {

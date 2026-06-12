@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { Modal, Spin, Alert, Tabs, Card, Tag, List, Empty, Statistic, Row, Col, Button, theme, message, Radio, InputNumber } from 'antd';
+import { Modal, Spin, Alert, Tabs, Card, Tag, List, Empty, Statistic, Row, Col, Button, theme, message } from 'antd';
 import {
   ThunderboltOutlined,
   BulbOutlined,
@@ -80,8 +80,6 @@ export default function ChapterAnalysis({ chapterId, visible, onClose }: Chapter
     }
   };
 
-  const [localStrategy, setLocalStrategy] = useState(() => localStorage.getItem('quick_check_strategy') || 'A+B');
-  const [localThreshold, setLocalThreshold] = useState(() => parseFloat(localStorage.getItem('quick_check_threshold') || '0.70'));
 
   const handleCheckAnchor = async () => {
     try {
@@ -236,7 +234,7 @@ const fetchAnalysisStatus = async () => {
   };
 
   const renderProgress = () => {
-    if (!task || task.status === 'completed' || task.status === 'cancelled' || task.status === 'failed') return null;
+    if (!task || task.status === 'completed') return null;
 
     return (
       <div style={{

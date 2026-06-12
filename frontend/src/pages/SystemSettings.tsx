@@ -725,6 +725,7 @@ export default function SystemSettingsPage() {
             ),
           },
           {
+            key: 'announcement',
             label: (
               <Space>
                 <BellOutlined />
