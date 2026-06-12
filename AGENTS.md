@@ -52,3 +52,75 @@ with open(path, 'w', encoding='utf-8', newline='') as fh:
 - **改 Python 后端**用 `.venv\Scripts\python.exe -c "import importlib; importlib.import_module('app.xxx')"` 跑 import smoke
 - **commit 之前**`git diff --stat` 检查范围，描述用 Conventional Commits 风格
 - **不要 PowerShell 写文件**这条覆盖了 .gitignore / .md / .yml / .json 等所有文本文件
+
+---
+
+## v2 补充 (Batch 1 后追加)
+
+### 1. PowerShell 的 `Move-Item /tmp/...` 跟 Git Bash 行为不同
+
+PowerShell 把 `/tmp/...` 解释成当前驱动器根下的 `tmp` 目录（不会自动创建），而 Git Bash 会映射到环境变量 TMP。
+如果用 `Move-Item /tmp/foo.py C:..bar.py` 之类的命令做"先备份再恢复"，PowerShell 可能：
+
+- 默默把源文件移动到不存在的位置（导致源文件消失但没报错）
+- 或把目标路径拼接成诡异的双前缀（`backend/backend/app/...`）
+
+**结论**：**不要用 `/tmp` 类绝对路径**。要么用 workdir 内的相对路径（`backups/_swap/foo.py`），要么用 Windows 原生 `%TEMP%` 环境变量。
+
+### 2. 项目存在循环 import 风险：`app.models` <-> `app.database`
+
+- `app/database.py` 在文件 **底部** 反向 `from app.models import (...)`，把 Project / Chapter / ... 拉一遍
+- `app/models/__init__.py` 第一个 import 又是 `from app.models.project import Project`，而 `project.py` 第一行就 `from app.database import Base`
+- 结果：单独 `importlib.import_module('app.models')` 或 `importlib.import_module('app.services.chapter_context_service')` 都会挂在 "circular import" 错误
+
+**正确 smoke 验证姿势**：先 `importlib.import_module('app.main')`（它内部走了完整初始化路径），再 import 目标子模块：
+
+```python
+import sys; sys.path.insert(0, '.')
+import importlib
+importlib.import_module('app.main')  # 兜底
+m = importlib.import_module('app.services.chapter_context_service')  # 即可正常
+```
+
+**绝对不要**用 `python -c "from app.models.chapter import Chapter"` 之类做 import smoke 验证。
+
+### 3. PowerShell 行内命令写大段 Python heredoc 极不稳定
+
+行内命令（`python -c @'...'@` 或 `python << PYEOF ... PYEOF`）在以下情况会丢字符：
+
+- 包含 `\\` 反斜杠
+- 包含中文标点（" " " "）
+- 包含三层以上引号嵌套
+- 包含 `$variable` 之类 PS 变量替换（PS 会贪婪替换）
+
+**结论**：**所有多步/多行 Python 改动都写 .py 临时文件再 `python xxx.py`**：
+
+```powershell
+# -*- coding: utf-8 -*- 的源码写到 .py 文件
+@'
+# -*- coding: utf-8 -*-
+# 改文件代码
+'@ | Out-File -Encoding utf8 _step.py
+python _step.py
+Remove-Item _step.py
+```
+
+### 4. 文件改动后一定要二次校验
+
+哪怕 `_t.py` 退出码 0 也不能信。PowerShell 的 Move-Item / 写入偶尔会静默失败（特别是路径含中文或空格时）。
+
+**最小校验三件套**：
+
+```python
+import os
+p = 'target/file.py'
+content = open(p, 'r', encoding='utf-8').read()
+print('size:', len(content))
+print('has expected marker:', 'expected_string' in content)
+```
+
+或者直接用 rg：
+
+```powershell
+rg -n 'expected_string' target/file.py
+```
