@@ -1553,3 +1553,78 @@ async def create_preset_from_current(
     
     logger.info(f"用户 {user.user_id} 从当前配置创建预设: {name}")
     return await create_preset(create_request, user, db)
+
+
+
+# ======================================================================
+# Z.5: chapter context 注入字段可配置 (GET / PUT)
+# ======================================================================
+
+class ChapterContextEnabledUpdate(BaseModel):
+    """Z.5: 用户更新 chapter context 启用字段配置"""
+    enabled: Dict[str, bool]
+
+
+@router.get("/chapter-context")
+async def get_chapter_context_enabled(
+    user: User = Depends(require_login),
+    db: AsyncSession = Depends(get_db)
+):
+    """Z.5: 获取当前用户的 chapter context 启用字段配置.
+
+    返回的 enabled dict 是 [DEFAULT_ENABLED 兜底 + 用户 stored 覆盖] 的合并,
+    即前端无脑用即可, 永远拿到完整 7 个 key.
+    """
+    from app.services.chapter_context_builder import chapter_context_builder
+    settings = await get_user_settings(user.user_id, db)
+    prefs = _safe_load_preferences(settings.preferences)
+    stored = prefs.get("chapter_context_enabled")
+    result: Dict[str, bool] = dict(chapter_context_builder.DEFAULT_ENABLED)
+    if isinstance(stored, dict):
+        for k in chapter_context_builder.ALL_KNOWN_KEYS:
+            if k in stored and isinstance(stored[k], bool):
+                result[k] = stored[k]
+    return {
+        "enabled": result,
+        "all_known_keys": list(chapter_context_builder.ALL_KNOWN_KEYS),
+        "is_default": not isinstance(stored, dict) or len(stored) == 0,
+    }
+
+
+@router.put("/chapter-context")
+async def update_chapter_context_enabled(
+    data: ChapterContextEnabledUpdate,
+    user: User = Depends(require_login),
+    db: AsyncSession = Depends(get_db)
+):
+    """Z.5: 更新 chapter context 启用字段配置.
+
+    行为约定:
+      - 只接受 ALL_KNOWN_KEYS 内的 key, 未知 key 400
+      - 全部 7 个 key 都必须传 (允许 false), 不增量合并
+      - 写库后立即失效 builder 缓存 (下次 build 立即生效, 不等 60s)
+    """
+    from app.services.chapter_context_builder import chapter_context_builder
+    # 校验: 未知 key 拒绝
+    for k in data.enabled.keys():
+        if k not in chapter_context_builder.ALL_KNOWN_KEYS:
+            raise HTTPException(
+                status_code=400,
+                detail=f"未知字段 '{k}', 仅支持: {list(chapter_context_builder.ALL_KNOWN_KEYS)}",
+            )
+    # 校验: value 必须是 bool
+    for k, v in data.enabled.items():
+        if not isinstance(v, bool):
+            raise HTTPException(status_code=400, detail=f"字段 '{k}' 必须是 bool, 收到: {type(v).__name__}")
+    settings = await get_user_settings(user.user_id, db)
+    prefs = _safe_load_preferences(settings.preferences)
+    prefs["chapter_context_enabled"] = dict(data.enabled)
+    settings.preferences = json.dumps(prefs, ensure_ascii=False)
+    await db.commit()
+    # 失效 builder 缓存, 下次生成立即生效
+    chapter_context_builder.invalidate_enabled_cache(user_id=user.user_id)
+    logger.info(f"用户 {user.user_id} 更新 chapter_context_enabled: {data.enabled}")
+    return {
+        "message": "已更新",
+        "enabled": dict(data.enabled),
+    }
