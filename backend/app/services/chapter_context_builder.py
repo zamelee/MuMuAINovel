@@ -165,6 +165,51 @@ class ChapterContextBuilder:
             after = cs.get("state_after") or "—"
             lines.append(f"  {name}: {before} -> {after}")
         return "\n".join(lines)
+    async def inject_prev_chapter_meta(
+        self,
+        prev_chapter,
+        context,
+        user_id,
+        db,
+    ) -> None:
+        """(Batch 4-1n) 共用 helper: 把 prev chapter 的 emotion/character_state 注入到 context.continuation_point
+
+        适用 OneToOneContext / OneToManyContext (都用 continuation_point 字段),
+        用 getattr/setattr 多态访问, 不需要 context 是某个特定 dataclass.
+
+        - emotion_curve 启用 -> 追加 prev 章 emotional_tone/intensity 块
+        - character_state 启用 -> 追加 prev 章 character_states 块
+        - 若 continuation_point 已有内容, 用 \n\n 追加; 否则直接赋值
+        - 任何异常都降级为 warning, 不影响主流程
+        """
+        try:
+            enabled = await self._resolve_enabled(db, user_id)
+            meta_blocks = []
+            if enabled.get("emotion_curve"):
+                emo = await self._load_prev_emotion(db, prev_chapter)
+                if emo:
+                    emo_block = self._format_prev_emotion_block(emo)
+                    if emo_block:
+                        meta_blocks.append(emo_block)
+                        logger.info("  ✅ Z.3 prev emotion injected")
+            if enabled.get("character_state"):
+                char_states = await self._load_prev_character_states(db, prev_chapter)
+                if char_states:
+                    cs_block = self._format_prev_character_state_block(char_states)
+                    if cs_block:
+                        meta_blocks.append(cs_block)
+                        logger.info(f"  ✅ Z.4 prev character_state injected: n={len(char_states)}")
+            if meta_blocks:
+                meta_text = "\n\n".join(meta_blocks)
+                cp = getattr(context, "continuation_point", None)
+                if cp:
+                    setattr(context, "continuation_point", cp + "\n\n" + meta_text)
+                else:
+                    # prev chapter 无 content (草稿状态), 但有 emotion/character, 也注入
+                    setattr(context, "continuation_point", meta_text)
+        except Exception as z_e:
+            logger.warning(f"  ⚠️ emotion/character_state 注入失败: {str(z_e)}")
+
 
     async def _resolve_enabled(self, db, user_id: Optional[str]) -> Dict[str, bool]:
         """Z.5: 解析当前 chapter context 启用的字段, 带 60s 缓存.
