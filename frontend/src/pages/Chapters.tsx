@@ -1,12 +1,12 @@
-import { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { useState, useEffect, useRef } from 'react';
 import { List, Button, Checkbox, Modal, Form, Input, Select, message, Empty, Space, Badge, Tag, Card, InputNumber, Alert, Radio, Descriptions, Collapse, Popconfirm, Pagination, theme, Tooltip } from 'antd';
-import { EditOutlined, FileTextOutlined, ThunderboltOutlined, LockOutlined, DownloadOutlined, SettingOutlined, FundOutlined, SyncOutlined, CheckCircleOutlined, CloseCircleOutlined, RocketOutlined, StopOutlined, InfoCircleOutlined, CaretRightOutlined, DeleteOutlined, BookOutlined, FormOutlined, PlusOutlined, ReadOutlined } from '@ant-design/icons';
+import { EditOutlined, FileTextOutlined, ThunderboltOutlined, LockOutlined, DownloadOutlined, SettingOutlined, FundOutlined, SyncOutlined, CloseCircleOutlined, RocketOutlined, StopOutlined, InfoCircleOutlined, CaretRightOutlined, DeleteOutlined, BookOutlined, FormOutlined, PlusOutlined, ReadOutlined } from '@ant-design/icons';
 import { useStore } from '../store';
 import { eventBus } from '../store/eventBus';
 import { useChapterSync } from '../store/hooks';
 import { generateChapterBackground } from '../services/backgroundTaskService';
 import { projectApi, writingStyleApi, chapterApi } from '../services/api';
-import type { Chapter, ChapterUpdate, ApiError, WritingStyle, AnalysisTask, ExpansionPlanData } from '../types';
+import type { Chapter, ChapterUpdate, ApiError, WritingStyle, ExpansionPlanData } from '../types';
 import type { TextAreaRef } from 'antd/es/input/TextArea';
 import ChapterAnalysis from '../components/ChapterAnalysis';
 import ExpansionPlanEditor from '../components/ExpansionPlanEditor';
@@ -14,6 +14,9 @@ import { SSELoadingOverlay } from '../components/SSELoadingOverlay';
 import ChapterReader from '../components/ChapterReader';
 import PartialRegenerateToolbar from '../components/PartialRegenerateToolbar';
 import PartialRegenerateModal from '../components/PartialRegenerateModal';
+import { useChapterList } from './chapters/hooks/useChapterList';
+import { useChapterAnalysis } from './chapters/hooks/useChapterAnalysis';
+import { useChapterReader } from './chapters/hooks/useChapterReader';
 
 const { TextArea } = Input;
 
@@ -108,33 +111,9 @@ export default function Chapters() {
   const [temporaryNarrativePerspective, setTemporaryNarrativePerspective] = useState<string | undefined>(); // 临时人称选择
   const [availableSkills, setAvailableSkills] = useState<Array<{ template_key: string; template_name: string; description: string; category: string }>>([]);
   const [selectedSkillKey, setSelectedSkillKey] = useState<string | undefined>();
-  const [analysisVisible, setAnalysisVisible] = useState(false);
-  const [analysisChapterId, setAnalysisChapterId] = useState<string | null>(null);
-  // 分析任务状态管理
-  const [analysisTasksMap, setAnalysisTasksMap] = useState<Record<string, AnalysisTask>>({});
-  const analysisPollingIntervalRef = useRef<number | null>(null);
-  const activeAnalysisPollingIdsRef = useRef<Set<string>>(new Set());
-
-  // 列表查询与分页状态
-  const [chapterSearchKeyword, setChapterSearchKeyword] = useState('');
-  const [chapterPage, setChapterPage] = useState(1);
-  const [chapterPageSize, setChapterPageSize] = useState(20);
-
-  // 阅读器状态
-  const [readerVisible, setReaderVisible] = useState(false);
-  const [readingChapter, setReadingChapter] = useState<Chapter | null>(null);
-
   // 规划编辑状态
   const [planEditorVisible, setPlanEditorVisible] = useState(false);
   const [editingPlanChapter, setEditingPlanChapter] = useState<Chapter | null>(null);
-
-  // 局部重写状态
-  const [partialRegenerateToolbarVisible, setPartialRegenerateToolbarVisible] = useState(false);
-  const [partialRegenerateToolbarPosition, setPartialRegenerateToolbarPosition] = useState({ top: 0, left: 0 });
-  const [selectedTextForRegenerate, setSelectedTextForRegenerate] = useState('');
-  const [selectionStartPosition, setSelectionStartPosition] = useState(0);
-  const [selectionEndPosition, setSelectionEndPosition] = useState(0);
-  const [partialRegenerateModalVisible, setPartialRegenerateModalVisible] = useState(false);
 
   // 单章节生成进度状态
   const [singleChapterProgress, setSingleChapterProgress] = useState(0);
@@ -163,7 +142,6 @@ export default function Chapters() {
   // 批量生成相关状态
   const [batchGenerateVisible, setBatchGenerateVisible] = useState(false);
   const [batchGenerating, setBatchGenerating] = useState(false);
-  const [batchAnalyzingUnanalyzed, setBatchAnalyzingUnanalyzed] = useState(false);
   const [batchTaskId, setBatchTaskId] = useState<string | null>(null);
   const [batchForm] = Form.useForm();
   const [manualCreateForm] = Form.useForm();
@@ -185,211 +163,59 @@ export default function Chapters() {
     return () => window.removeEventListener('resize', handleResize);
   }, []);
 
-  // 处理文本选中 - 检测选中文本并显示浮动工具栏
-  const handleTextSelection = useCallback(() => {
-    // 只在编辑器打开时处理选中
-    if (!isEditorOpen || isGenerating) {
-      setPartialRegenerateToolbarVisible(false);
-      return;
-    }
+  // ===== Phase 3a hooks =====
+  // useChapterAnalysis 必须在 useChapterList 之前（list 需要 analysisTasksMap）
+  const {
+    analysisTasksMap,
+    analysisVisible,
+    setAnalysisVisible,
+    analysisChapterId,
+    setAnalysisChapterId,
+    batchAnalyzingUnanalyzed,
+    loadAnalysisTasks,
+    startPollingTask,
+    handleShowAnalysis,
+    handleBatchAnalyzeUnanalyzed,
+    renderAnalysisStatus,
+  } = useChapterAnalysis(currentProject?.id);
 
-    const selection = window.getSelection();
-    if (!selection || selection.rangeCount === 0) {
-      setPartialRegenerateToolbarVisible(false);
-      return;
-    }
+  // useChapterList: 章节排序/过滤/分页 + 生成门控
+  const {
+    chapterSearchKeyword, setChapterSearchKeyword,
+    chapterPage, setChapterPage,
+    chapterPageSize, setChapterPageSize,
+    sortedChapters,
+    filteredSortedChapters,
+    pagedSortedChapters,
+    pagedGroupedChapters,
+    batchAnalyzableChapterCount,
+    canGenerateChapter,
+    getGenerateDisabledReason,
+  } = useChapterList(chapters, analysisTasksMap, currentProject?.outline_mode);
 
-    const selectedText = selection.toString().trim();
-    
-    // 至少选中10个字符才显示工具栏
-    if (selectedText.length < 10) {
-      setPartialRegenerateToolbarVisible(false);
-      return;
-    }
+  // useChapterReader: 阅读器 + 局部重写（依赖 isEditorOpen/isGenerating/contentTextAreaRef/editorForm）
+  const {
+    readerVisible, setReaderVisible,
+    readingChapter, setReadingChapter,
+    partialRegenerateToolbarVisible,
+    partialRegenerateToolbarPosition,
+    selectedTextForRegenerate,
+    selectionStartPosition,
+    selectionEndPosition,
+    partialRegenerateModalVisible, setPartialRegenerateModalVisible,
+    handleOpenReader,
+    handleReaderChapterChange,
+    handleOpenPartialRegenerate,
+    handleApplyPartialRegenerate,
+  } = useChapterReader({
+    isEditorOpen,
+    isGenerating,
+    contentTextAreaRef,
+    editorForm,
+  });
 
-    // 检查选中是否在 TextArea 内
-    const textArea = contentTextAreaRef.current?.resizableTextArea?.textArea;
-    if (!textArea) {
-      setPartialRegenerateToolbarVisible(false);
-      return;
-    }
-    
-    // 检查选中是否在 textarea 内（需要特殊处理，因为 textarea 的选中不会创建 range）
-    if (document.activeElement !== textArea) {
-      setPartialRegenerateToolbarVisible(false);
-      return;
-    }
 
-    // 获取 textarea 中的选中位置
-    const start = textArea.selectionStart;
-    const end = textArea.selectionEnd;
-    const textContent = textArea.value;
-    const selectedInTextArea = textContent.substring(start, end);
 
-    if (selectedInTextArea.trim().length < 10) {
-      setPartialRegenerateToolbarVisible(false);
-      return;
-    }
-
-    // 计算浮动工具栏位置
-    const rect = textArea.getBoundingClientRect();
-    const computedStyle = window.getComputedStyle(textArea);
-    const lineHeight = parseFloat(computedStyle.lineHeight) || 24;
-    const paddingTop = parseFloat(computedStyle.paddingTop) || 0;
-    
-    // 计算选中文本起始位置所在的行号
-    const textBeforeSelection = textContent.substring(0, start);
-    const startLine = textBeforeSelection.split('\n').length - 1;
-    
-    // 计算选中文本在 textarea 中的视觉位置
-    // 需要考虑 scrollTop（textarea 内部滚动偏移）
-    const scrollTop = textArea.scrollTop;
-    const visualTop = (startLine * lineHeight) + paddingTop - scrollTop;
-    
-    // 工具栏位置：textarea 顶部 + 选中文本的视觉位置 - 工具栏高度偏移
-    const toolbarTop = rect.top + visualTop - 45;
-    
-    // 水平位置：放在 textarea 的右侧区域，避免遮挡文本
-    const toolbarLeft = rect.right - 180;
-
-    setSelectedTextForRegenerate(selectedInTextArea);
-    setSelectionStartPosition(start);
-    setSelectionEndPosition(end);
-    
-    // 计算工具栏位置，如果选中位置不在可视区域内，固定在边缘
-    let finalTop = toolbarTop;
-    if (visualTop < 0) {
-      finalTop = rect.top + 10;
-    } else if (visualTop > textArea.clientHeight) {
-      finalTop = rect.bottom - 50;
-    }
-    
-    setPartialRegenerateToolbarPosition({
-      top: Math.max(rect.top + 10, Math.min(finalTop, rect.bottom - 50)),
-      left: Math.min(Math.max(rect.left + 20, toolbarLeft), window.innerWidth - 200),
-    });
-    setPartialRegenerateToolbarVisible(true);
-  }, [isEditorOpen, isGenerating]);
-
-  // 更新工具栏位置的函数（不检测选中，只更新位置）
-  const updateToolbarPosition = useCallback(() => {
-    if (!partialRegenerateToolbarVisible || !selectedTextForRegenerate) return;
-    
-    const textArea = contentTextAreaRef.current?.resizableTextArea?.textArea;
-    if (!textArea) return;
-    
-    const rect = textArea.getBoundingClientRect();
-    const computedStyle = window.getComputedStyle(textArea);
-    const lineHeight = parseFloat(computedStyle.lineHeight) || 24;
-    const paddingTop = parseFloat(computedStyle.paddingTop) || 0;
-    
-    const textContent = textArea.value;
-    const textBeforeSelection = textContent.substring(0, selectionStartPosition);
-    const startLine = textBeforeSelection.split('\n').length - 1;
-    
-    const scrollTop = textArea.scrollTop;
-    const visualTop = (startLine * lineHeight) + paddingTop - scrollTop;
-    
-    const toolbarTop = rect.top + visualTop - 45;
-    // 固定在 textarea 右上角，不随选中位置变化
-    const toolbarLeft = rect.right - 180;
-    
-    // 工具栏固定在 textarea 可视区域内，即使选中文本滚出视野也保持显示
-    // 如果选中位置在可视区域内，跟随选中位置
-    // 如果滚出视野，固定在顶部或底部边缘
-    let finalTop = toolbarTop;
-    if (visualTop < 0) {
-      // 选中位置在上方视野外，工具栏固定在顶部
-      finalTop = rect.top + 10;
-    } else if (visualTop > textArea.clientHeight) {
-      // 选中位置在下方视野外，工具栏固定在底部
-      finalTop = rect.bottom - 50;
-    }
-    
-    setPartialRegenerateToolbarPosition({
-      top: Math.max(rect.top + 10, Math.min(finalTop, rect.bottom - 50)),
-      left: Math.min(Math.max(rect.left + 20, toolbarLeft), window.innerWidth - 200),
-    });
-  }, [partialRegenerateToolbarVisible, selectedTextForRegenerate, selectionStartPosition]);
-
-  // 监听选中事件
-  useEffect(() => {
-    if (!isEditorOpen) return;
-
-    const textArea = contentTextAreaRef.current?.resizableTextArea?.textArea;
-    if (!textArea) return;
-
-    const handleMouseUp = () => {
-      // 鼠标释放时检查选中
-      setTimeout(handleTextSelection, 50);
-    };
-
-    const handleKeyUp = (e: KeyboardEvent) => {
-      // Shift + 方向键选中时检查
-      if (e.shiftKey && ['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(e.key)) {
-        setTimeout(handleTextSelection, 50);
-      }
-    };
-
-    const handleScroll = () => {
-      // 滚动时更新位置（使用 requestAnimationFrame 优化性能）
-      requestAnimationFrame(updateToolbarPosition);
-    };
-
-    // 监听 textarea 滚动
-    textArea.addEventListener('mouseup', handleMouseUp);
-    textArea.addEventListener('keyup', handleKeyUp);
-    textArea.addEventListener('scroll', handleScroll);
-
-    // 同时监听 Modal body 滚动（Modal 内容可能在外层容器滚动）
-    const modalBody = textArea.closest('.ant-modal-body');
-    if (modalBody) {
-      modalBody.addEventListener('scroll', handleScroll);
-    }
-
-    // 监听窗口大小变化
-    window.addEventListener('resize', handleScroll);
-
-    return () => {
-      textArea.removeEventListener('mouseup', handleMouseUp);
-      textArea.removeEventListener('keyup', handleKeyUp);
-      textArea.removeEventListener('scroll', handleScroll);
-      if (modalBody) {
-        modalBody.removeEventListener('scroll', handleScroll);
-      }
-      window.removeEventListener('resize', handleScroll);
-    };
-  }, [isEditorOpen, handleTextSelection, updateToolbarPosition]);
-
-  // 点击其他区域时隐藏工具栏
-  useEffect(() => {
-    const handleClickOutside = (e: MouseEvent) => {
-      const target = e.target as HTMLElement;
-      
-      // 如果点击的是工具栏，不隐藏
-      if (target.closest('[data-partial-regenerate-toolbar]')) {
-        return;
-      }
-      
-      // 如果点击的是 textarea，不隐藏
-      if (target.tagName === 'TEXTAREA') {
-        return;
-      }
-      
-      // 如果点击的是 Modal 内部（包括滚动条），不隐藏
-      if (target.closest('.ant-modal-content')) {
-        return;
-      }
-      
-      // 点击 Modal 外部才隐藏工具栏
-      setPartialRegenerateToolbarVisible(false);
-    };
-
-    if (partialRegenerateToolbarVisible) {
-      document.addEventListener('click', handleClickOutside);
-      return () => document.removeEventListener('click', handleClickOutside);
-    }
-  }, [partialRegenerateToolbarVisible]);
 
   const {
     refreshChapters,
@@ -412,115 +238,12 @@ export default function Chapters() {
   useEffect(() => {
     const batchPollingInterval = batchPollingIntervalRef.current;
     return () => {
-      if (analysisPollingIntervalRef.current) {
-        clearInterval(analysisPollingIntervalRef.current);
-        analysisPollingIntervalRef.current = null;
-      }
       if (batchPollingInterval) {
         clearInterval(batchPollingInterval);
       }
     };
   }, []);
 
-  const clearAnalysisPollingIfIdle = useCallback(() => {
-    if (activeAnalysisPollingIdsRef.current.size === 0 && analysisPollingIntervalRef.current) {
-      clearInterval(analysisPollingIntervalRef.current);
-      analysisPollingIntervalRef.current = null;
-    }
-  }, []);
-
-  const pollActiveAnalysisTasks = useCallback(async () => {
-    if (!currentProject?.id) return;
-
-    const activeIds = Array.from(activeAnalysisPollingIdsRef.current);
-    if (activeIds.length === 0) {
-      clearAnalysisPollingIfIdle();
-      return;
-    }
-
-    try {
-      const response = await chapterApi.getBatchAnalysisStatuses(currentProject.id, activeIds);
-      const tasksMap = response.items || {};
-
-      setAnalysisTasksMap(prev => ({
-        ...prev,
-        ...tasksMap,
-      }));
-
-      activeIds.forEach((chapterId) => {
-        const task = tasksMap[chapterId];
-        if (!task || task.status === 'completed' || task.status === 'failed' || task.status === 'none' || task.status === 'cancelled') {
-          activeAnalysisPollingIdsRef.current.delete(chapterId);
-
-          if (task?.status === 'completed') {
-            message.success('章节分析完成');
-          } else if (task?.status === 'failed') {
-            message.error(`章节分析失败: ${task.error_message || '未知错误'}`);
-          }
-        }
-      });
-
-      clearAnalysisPollingIfIdle();
-    } catch (error) {
-      console.error('批量轮询分析任务失败:', error);
-    }
-  }, [clearAnalysisPollingIfIdle, currentProject?.id]);
-
-  const ensureAnalysisPolling = useCallback(() => {
-    if (analysisPollingIntervalRef.current) return;
-
-    analysisPollingIntervalRef.current = window.setInterval(() => {
-      void pollActiveAnalysisTasks();
-    }, 2000);
-
-    // 立即执行一次
-    void pollActiveAnalysisTasks();
-  }, [pollActiveAnalysisTasks]);
-
-  // 加载所有章节的分析任务状态（批量接口，避免逐章请求风暴）
-  // 接受可选的 chaptersToLoad 参数，解决 React 状态更新延迟导致的问题
-  const loadAnalysisTasks = async (chaptersToLoad?: typeof chapters) => {
-    const targetChapters = chaptersToLoad || chapters;
-    if (!targetChapters || targetChapters.length === 0 || !currentProject?.id) return;
-
-    const chapterIds = targetChapters
-      .filter(chapter => chapter.content && chapter.content.trim() !== '')
-      .map(chapter => chapter.id);
-
-    if (chapterIds.length === 0) {
-      setAnalysisTasksMap({});
-      activeAnalysisPollingIdsRef.current.clear();
-      clearAnalysisPollingIfIdle();
-      return;
-    }
-
-    try {
-      const response = await chapterApi.getBatchAnalysisStatuses(currentProject.id, chapterIds);
-      const tasksMap = response.items || {};
-      setAnalysisTasksMap(tasksMap);
-
-      activeAnalysisPollingIdsRef.current.clear();
-      Object.entries(tasksMap).forEach(([chapterId, task]) => {
-        if (task?.status === 'pending' || task?.status === 'running') {
-          activeAnalysisPollingIdsRef.current.add(chapterId);
-        }
-      });
-
-      if (activeAnalysisPollingIdsRef.current.size > 0) {
-        ensureAnalysisPolling();
-      } else {
-        clearAnalysisPollingIfIdle();
-      }
-    } catch (error) {
-      console.error('批量加载分析任务状态失败:', error);
-    }
-  };
-
-  // 启动单个章节的任务轮询（内部合并到批量轮询）
-  const startPollingTask = (chapterId: string) => {
-    activeAnalysisPollingIdsRef.current.add(chapterId);
-    ensureAnalysisPolling();
-  };
 
   const loadWritingStyles = async () => {
     if (!currentProject?.id) return;
@@ -664,145 +387,6 @@ export default function Chapters() {
     }
   };
 
-  // 按章节号排序并按大纲分组章节 (必须在早返回之前调用，避免违反 Hooks 规则)
-  const { sortedChapters } = useMemo(() => {
-    const sorted = [...chapters].sort((a, b) => a.chapter_number - b.chapter_number);
-
-    const groups: Record<string, {
-      outlineId: string | null;
-      outlineTitle: string;
-      outlineOrder: number;
-      chapters: Chapter[];
-    }> = {};
-
-    sorted.forEach(chapter => {
-      const key = chapter.outline_id || 'uncategorized';
-
-      if (!groups[key]) {
-        groups[key] = {
-          outlineId: chapter.outline_id || null,
-          outlineTitle: chapter.outline_title || '未分类章节',
-          outlineOrder: chapter.outline_order ?? 999,
-          chapters: []
-        };
-      }
-
-      groups[key].chapters.push(chapter);
-    });
-
-    return { sortedChapters: sorted };
-  }, [chapters]);
-
-  // 章节查询过滤（前端过滤，减少渲染压力）
-  const filteredSortedChapters = useMemo(() => {
-    const keyword = chapterSearchKeyword.trim().toLowerCase();
-    if (!keyword) return sortedChapters;
-
-    return sortedChapters.filter((chapter) => {
-      return (
-        String(chapter.chapter_number).includes(keyword) ||
-        chapter.title.toLowerCase().includes(keyword) ||
-        (chapter.outline_title || '').toLowerCase().includes(keyword)
-      );
-    });
-  }, [sortedChapters, chapterSearchKeyword]);
-
-  // 分页后的扁平章节
-  const pagedSortedChapters = useMemo(() => {
-    const start = (chapterPage - 1) * chapterPageSize;
-    return filteredSortedChapters.slice(start, start + chapterPageSize);
-  }, [filteredSortedChapters, chapterPage, chapterPageSize]);
-
-  // one-to-many 模式分页后再按大纲分组
-  const pagedGroupedChapters = useMemo(() => {
-    const groups: Record<string, {
-      outlineId: string | null;
-      outlineTitle: string;
-      outlineOrder: number;
-      chapters: Chapter[];
-    }> = {};
-
-    pagedSortedChapters.forEach(chapter => {
-      const key = chapter.outline_id || 'uncategorized';
-      if (!groups[key]) {
-        groups[key] = {
-          outlineId: chapter.outline_id || null,
-          outlineTitle: chapter.outline_title || '未分类章节',
-          outlineOrder: chapter.outline_order ?? 999,
-          chapters: []
-        };
-      }
-      groups[key].chapters.push(chapter);
-    });
-
-    return Object.values(groups).sort((a, b) => a.outlineOrder - b.outlineOrder);
-  }, [pagedSortedChapters]);
-
-  // 搜索词或分页大小变化时重置到第一页
-  useEffect(() => {
-    setChapterPage(1);
-  }, [chapterSearchKeyword, chapterPageSize, currentProject?.outline_mode]);
-
-  // 数据变化导致页码越界时自动纠正
-  useEffect(() => {
-    const maxPage = Math.max(1, Math.ceil(filteredSortedChapters.length / chapterPageSize));
-    if (chapterPage > maxPage) {
-      setChapterPage(maxPage);
-    }
-  }, [filteredSortedChapters.length, chapterPage, chapterPageSize]);
-
-  // 预计算每章可生成状态，避免在渲染阶段重复 O(n²) 扫描
-  const chapterGenerateGateMap = useMemo(() => {
-    const gateMap: Record<string, { canGenerate: boolean; reason: string }> = {};
-    const incompleteChapterNumbers: number[] = [];
-    const unanalyzedChapters: Array<{ chapterNumber: number; reason: string }> = [];
-
-    sortedChapters.forEach((chapter) => {
-      if (incompleteChapterNumbers.length > 0) {
-        gateMap[chapter.id] = {
-          canGenerate: false,
-          reason: `需要先完成前置章节：第 ${incompleteChapterNumbers.join('、')} 章`
-        };
-      } else if (unanalyzedChapters.length > 0) {
-        gateMap[chapter.id] = {
-          canGenerate: false,
-          reason: `需要先分析前置章节：第 ${unanalyzedChapters.map(c => c.chapterNumber).join('、')} 章 (${unanalyzedChapters.map(c => c.reason).join('、')})`
-        };
-      } else {
-        gateMap[chapter.id] = { canGenerate: true, reason: '' };
-      }
-
-      // 将当前章纳入“后续章节”的前置条件
-      if (!chapter.content || chapter.content.trim() === '') {
-        incompleteChapterNumbers.push(chapter.chapter_number);
-      }
-
-      const task = analysisTasksMap[chapter.id];
-      if (!task || !task.has_task) {
-        unanalyzedChapters.push({ chapterNumber: chapter.chapter_number, reason: '未分析' });
-      } else if (task.status === 'pending') {
-        unanalyzedChapters.push({ chapterNumber: chapter.chapter_number, reason: '等待分析' });
-      } else if (task.status === 'running') {
-        unanalyzedChapters.push({ chapterNumber: chapter.chapter_number, reason: '分析中' });
-      } else if (task.status === 'failed') {
-        unanalyzedChapters.push({ chapterNumber: chapter.chapter_number, reason: '分析失败' });
-      } else if (task.status !== 'completed') {
-        unanalyzedChapters.push({ chapterNumber: chapter.chapter_number, reason: '状态未知' });
-      }
-    });
-
-    return gateMap;
-  }, [sortedChapters, analysisTasksMap]);
-
-  // 当前可被“一键分析”的章节（有内容且未处于完成/进行中）
-  const batchAnalyzableChapterCount = useMemo(() => {
-    return sortedChapters.filter((chapter) => {
-      if (!chapter.content || chapter.content.trim() === '') return false;
-      const task = analysisTasksMap[chapter.id];
-      if (!task || !task.has_task) return true;
-      return task.status !== 'completed' && task.status !== 'pending' && task.status !== 'running';
-    }).length;
-  }, [sortedChapters, analysisTasksMap]);
 
   if (!currentProject) return null;
 
@@ -819,14 +403,6 @@ export default function Chapters() {
       '全知视角': '全知视角',
     };
     return texts[perspective || ''] || '第三人称（默认）';
-  };
-
-  const canGenerateChapter = (chapter: Chapter): boolean => {
-    return chapterGenerateGateMap[chapter.id]?.canGenerate ?? true;
-  };
-
-  const getGenerateDisabledReason = (chapter: Chapter): string => {
-    return chapterGenerateGateMap[chapter.id]?.reason || '';
   };
 
   const handleOpenModal = (id: string) => {
@@ -1184,45 +760,8 @@ export default function Chapters() {
     });
   };
 
-  const handleShowAnalysis = (chapterId: string) => {
-    setAnalysisChapterId(chapterId);
-    setAnalysisVisible(true);
-  };
 
   // 一键按章节顺序分析未分析章节
-  const handleBatchAnalyzeUnanalyzed = async () => {
-    if (!currentProject?.id) return;
-
-    try {
-      setBatchAnalyzingUnanalyzed(true);
-      const result = await chapterApi.batchAnalyzeUnanalyzed(currentProject.id);
-
-      if (result.total_started > 0) {
-        setAnalysisTasksMap((prev) => ({
-          ...prev,
-          ...result.started_tasks,
-        }));
-
-        Object.keys(result.started_tasks).forEach((chapterId) => {
-          startPollingTask(chapterId);
-        });
-
-        message.success(
-          `已加入 ${result.total_started} 章顺序分析队列（跳过已分析 ${result.total_already_completed} 章，分析中/排队中 ${result.total_skipped_running} 章）`
-        );
-      } else {
-        message.info('没有可启动分析的章节：当前章节要么无内容、要么已分析完成、要么正在分析中');
-      }
-
-      // 刷新一次状态，确保前端与后端一致
-      await loadAnalysisTasks();
-    } catch (error: unknown) {
-      const err = error as Error;
-      message.error(`一键分析失败：${err.message || '未知错误'}`);
-    } finally {
-      setBatchAnalyzingUnanalyzed(false);
-    }
-  };
 
   // 批量生成函数
   const handleBatchGenerate = async (values: {
@@ -1681,49 +1220,6 @@ export default function Chapters() {
   };
 
   // 渲染分析状态标签
-  const renderAnalysisStatus = (chapterId: string) => {
-    const task = analysisTasksMap[chapterId];
-
-    if (!task) {
-      return null;
-    }
-
-    switch (task.status) {
-      case 'pending':
-        return (
-          <Tag icon={<SyncOutlined spin />} color="processing">
-            等待分析
-          </Tag>
-        );
-      case 'running': {
-        // 检查是否正在重试（后端会在error_message中包含"重试"信息）
-        const isRetrying = task.error_message && task.error_message.includes('重试');
-        return (
-          <Tag
-            icon={<SyncOutlined spin />}
-            color={isRetrying ? "warning" : "processing"}
-            title={task.error_message || undefined}
-          >
-            {isRetrying ? `重试中 ${task.progress}%` : `分析中 ${task.progress}%`}
-          </Tag>
-        );
-      }
-      case 'completed':
-        return (
-          <Tag icon={<CheckCircleOutlined />} color="success">
-            已分析
-          </Tag>
-        );
-      case 'failed':
-        return (
-          <Tag icon={<CloseCircleOutlined />} color="error" title={task.error_message || undefined}>
-            分析失败
-          </Tag>
-        );
-      default:
-        return null;
-    }
-  };
 
   // 显示展开规划详情
   const showExpansionPlanModal = (chapter: Chapter) => {
@@ -2012,45 +1508,6 @@ export default function Chapters() {
   };
 
   // 打开阅读器
-  const handleOpenReader = (chapter: Chapter) => {
-    setReadingChapter(chapter);
-    setReaderVisible(true);
-  };
-
-  // 阅读器切换章节
-  const handleReaderChapterChange = async (chapterId: string) => {
-    try {
-      const response = await fetch(`/api/chapters/${chapterId}`);
-      if (!response.ok) throw new Error('获取章节失败');
-      const newChapter = await response.json();
-      setReadingChapter(newChapter);
-    } catch {
-      message.error('加载章节失败');
-    }
-  };
-
-  // 打开局部重写弹窗
-  const handleOpenPartialRegenerate = () => {
-    setPartialRegenerateToolbarVisible(false);
-    setPartialRegenerateModalVisible(true);
-  };
-
-  // 应用局部重写结果
-  const handleApplyPartialRegenerate = (newText: string, startPos: number, endPos: number) => {
-    // 获取当前内容
-    const currentContent = editorForm.getFieldValue('content') || '';
-    
-    // 替换选中部分
-    const newContent = currentContent.substring(0, startPos) + newText + currentContent.substring(endPos);
-    
-    // 更新表单
-    editorForm.setFieldsValue({ content: newContent });
-    
-    // 关闭弹窗
-    setPartialRegenerateModalVisible(false);
-    
-    message.success('局部重写已应用');
-  };
 
   return (
     <div style={{ display: 'flex', flexDirection: 'column', height: '100%' }}>
