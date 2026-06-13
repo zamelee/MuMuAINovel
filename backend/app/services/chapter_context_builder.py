@@ -27,6 +27,8 @@ class ChapterContextBuilder:
         "prev_end_anchor": True,
         "prev_summary": True,
         "recent_chapters": True,
+        # Z.3: 情感曲线 (单章 + 趋势) - 用现成 plot_analysis.emotional_curve JSON 字段, 零 schema 变更
+        "emotion_curve": True,
     }
     # Z.5: 完整字段集 (含未来扩展位, 当前 API 只暴露 DEFAULT_ENABLED 的 key)
     # 未来 emotion_curve / character_state 接入时, 把 key 移到 DEFAULT_ENABLED + 在这里登记即可
@@ -38,11 +40,71 @@ class ChapterContextBuilder:
         "prev_end_anchor",
         "prev_summary",
         "recent_chapters",
+        # Z.3: 情感曲线
+        "emotion_curve",
     )
     # Z.5: 缓存 TTL (秒) —— 避免每章都查 DB
     _ENABLED_CACHE_TTL = 60
     # Z.5: 模块级缓存  {user_id: (enabled_dict, cached_at)}
     _enabled_cache: Dict[str, Tuple[Dict[str, bool], float]] = {}
+
+    async def _load_prev_emotion(self, db, prev_chapter) -> Optional[Dict[str, Any]]:
+        """Z.3: 从 PlotAnalysis 读 prev chapter 的情感数据 (单章视角).
+
+        返回 dict: {curve: {...}, tone: str, intensity: float}
+        若 PlotAnalysis 无 emotion 数据, 返回 None (caller 不注入).
+        """
+        try:
+            from app.models.memory import PlotAnalysis
+            from sqlalchemy import select
+            result = await db.execute(
+                select(
+                    PlotAnalysis.emotional_curve,
+                    PlotAnalysis.emotional_tone,
+                    PlotAnalysis.emotional_intensity,
+                ).where(PlotAnalysis.chapter_id == prev_chapter.id)
+            )
+            row = result.first()
+            if not row:
+                return None
+            curve, tone, intensity = row
+            # 三个字段全为空才算 None (任何有值都注入)
+            if not curve and not tone and intensity is None:
+                return None
+            return {
+                "curve": curve or {},
+                "tone": tone or "",
+                "intensity": float(intensity) if intensity is not None else 0.0,
+            }
+        except Exception as e:
+            logger.warning("[builder] _load_prev_emotion failed: " + str(e))
+            return None
+
+    def _format_prev_emotion_block(self, emo: Dict[str, Any]) -> str:
+        """Z.3: 把 prev chapter 情感数据格式化为 prompt 块.
+
+        示例输出:
+          上一章情感参考:
+            主导情感: 紧张
+            情感强度: 0.6 / 1.0
+            情感曲线: start=0.3, middle=0.7, end=0.5
+        """
+        lines = ["上一章情感参考:"]
+        tone = emo.get("tone") or ""
+        if tone:
+            lines.append(f"  主导情感: {tone}")
+        intensity = emo.get("intensity") or 0.0
+        if intensity > 0:
+            lines.append(f"  情感强度: {intensity:.1f} / 1.0")
+        curve = emo.get("curve") or {}
+        if isinstance(curve, dict) and curve:
+            curve_str = ", ".join(f"{k}={v}" for k, v in curve.items())
+            if curve_str:
+                lines.append(f"  情感曲线: {curve_str}")
+        # 至少要有一行非标题内容
+        if len(lines) <= 1:
+            return ""
+        return "\n".join(lines)
 
     async def _resolve_enabled(self, db, user_id: Optional[str]) -> Dict[str, bool]:
         """Z.5: 解析当前 chapter context 启用的字段, 带 60s 缓存.
@@ -210,12 +272,22 @@ class ChapterContextBuilder:
                     parts.append("上一章摘要:\\n" + prev_summary)
             except Exception as e:
                 logger.warning("[builder] P1 prev_summary failed: " + str(e))
+        # Z.3: 上一章情感曲线 (单章视角) —— 防止章节间情感断裂
+        if enabled["emotion_curve"]:
+            emo = await self._load_prev_emotion(db, prev_chapter)
+            if emo:
+                block = self._format_prev_emotion_block(emo)
+                if block:
+                    parts.append(block)
+                    logger.info("[builder] P1 prev emotion injected: tone=" + str(emo.get("tone")))
         if enabled["recent_chapters"]:
             try:
                 from app.services.chapter_context_service import OneToManyContextBuilder
                 recent_builder = OneToManyContextBuilder(memory_service=memory_service)
                 recent_ctx = await recent_builder._build_recent_chapters_context(
                     chapter=chapter, project_id=chapter.project_id, db=db,
+                    # Z.3: emotion_curve 控制是否在 recent 块顶部加情感趋势行
+                    include_emotion_trend=enabled["emotion_curve"],
                 )
                 if recent_ctx:
                     parts.append(recent_ctx)
@@ -345,6 +417,124 @@ async def _self_test_z5_invalidate_cache():
     return True
 
 
+async def _self_test_z3_load_prev_emotion_none():
+    """Z.3: 无 PlotAnalysis 数据时, _load_prev_emotion 返回 None"""
+    from unittest.mock import AsyncMock, MagicMock
+    prev_chapter = MagicMock()
+    prev_chapter.id = "prev-1"
+
+    r = MagicMock()
+    r.first.return_value = None  # 无 PlotAnalysis 行
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=r)
+
+    result = await chapter_context_builder._load_prev_emotion(db=db, prev_chapter=prev_chapter)
+    assert result is None, "无 PlotAnalysis 应返回 None, got: " + str(result)
+    print("  [PASS] z3 no PlotAnalysis -> None")
+    return True
+
+
+async def _self_test_z3_load_prev_emotion_full():
+    """Z.3: 有 PlotAnalysis 数据时, _load_prev_emotion 返回 dict"""
+    from unittest.mock import AsyncMock, MagicMock
+    prev_chapter = MagicMock()
+    prev_chapter.id = "prev-2"
+
+    r = MagicMock()
+    r.first.return_value = ({"start": 0.3, "middle": 0.7, "end": 0.5}, "紧张", 0.6)
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=r)
+
+    result = await chapter_context_builder._load_prev_emotion(db=db, prev_chapter=prev_chapter)
+    assert result is not None
+    assert result["tone"] == "紧张"
+    assert abs(result["intensity"] - 0.6) < 0.01
+    assert result["curve"] == {"start": 0.3, "middle": 0.7, "end": 0.5}
+    print("  [PASS] z3 with PlotAnalysis -> full dict")
+    return True
+
+
+async def _self_test_z3_format_emotion_block():
+    """Z.3: _format_prev_emotion_block 格式化正确"""
+    emo_full = {
+        "curve": {"start": 0.3, "middle": 0.7, "end": 0.5},
+        "tone": "紧张",
+        "intensity": 0.6,
+    }
+    block = chapter_context_builder._format_prev_emotion_block(emo_full)
+    assert "上一章情感参考:" in block
+    assert "紧张" in block
+    assert "0.6" in block
+    assert "情感曲线" in block
+    assert "start=0.3" in block, "应包含 start=0.3, got: " + block
+    print("  [PASS] z3 format block full")
+
+    # 部分数据: 只有 tone
+    emo_partial = {"curve": {}, "tone": "温馨", "intensity": 0.0}
+    block2 = chapter_context_builder._format_prev_emotion_block(emo_partial)
+    assert "上一章情感参考:" in block2
+    assert "温馨" in block2
+    assert "情感强度" not in block2, "intensity=0 应不显示"
+    assert "情感曲线" not in block2, "空 curve 应不显示"
+    print("  [PASS] z3 format block partial (tone only)")
+
+    # 空数据: 全部为空
+    emo_empty = {"curve": {}, "tone": "", "intensity": 0.0}
+    block3 = chapter_context_builder._format_prev_emotion_block(emo_empty)
+    assert block3 == "", "全空应返回空字符串, got: " + repr(block3)
+    print("  [PASS] z3 format block empty -> empty string")
+    return True
+
+
+async def _self_test_z3_emotion_curve_disabled():
+    """Z.3: enabled['emotion_curve']=False 时, build_previous_context 不注入"""
+    from unittest.mock import AsyncMock, MagicMock
+
+    # 模拟 prev chapter
+    prev_chapter = MagicMock()
+    prev_chapter.id = "prev-3"
+    prev_chapter.content = "前章内容..."
+    prev_chapter.end_anchor = None
+
+    chapter = MagicMock()
+    chapter.id = "curr"
+    chapter.project_id = "proj-1"
+    chapter.chapter_number = 2
+
+    # mock db
+    r = MagicMock()
+    r.first.return_value = ({"start": 0.3, "middle": 0.7, "end": 0.5}, "紧张", 0.6)
+    r.scalar_one_or_none.return_value = None  # prev_summary / prev_end_anchor 都没有
+    s = MagicMock()
+    s.all.return_value = []
+    r.scalars.return_value = s
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=r)
+
+    # 强制 enabled["emotion_curve"]=False, 其它保持默认
+    from unittest.mock import patch
+    chapter_context_builder.invalidate_enabled_cache()
+    with patch.object(chapter_context_builder, "_resolve_enabled") as mock_resolve:
+        mock_resolve.return_value = {
+            "scene_state": False,
+            "outline_pruning_warning": False,
+            "foreshadow_logger_only": False,
+            "prev_content_tail": False,
+            "prev_end_anchor": False,
+            "prev_summary": False,
+            "recent_chapters": False,
+            "emotion_curve": False,  # 关闭
+        }
+        parts = await chapter_context_builder.build_previous_context(
+            chapter=chapter, db=db, memory_service=MagicMock()
+        )
+
+    # 所有块都关闭, 应为空
+    assert parts == [], "全部 enabled=False 应返回空, got: " + str(parts)
+    print("  [PASS] z3 emotion_curve disabled -> no block")
+    return True
+
+
 def run_self_tests():
     # HANDOFF v1 兜底: 触发 app.models 完整初始化, 解决循环 import
     try:
@@ -363,6 +553,10 @@ def run_self_tests():
         ("z5_default_no_user", _self_test_z5_default_no_user),
         ("z5_load_from_settings", _self_test_z5_load_from_settings),
         ("z5_invalidate_cache", _self_test_z5_invalidate_cache),
+        ("z3_load_prev_emotion_none", _self_test_z3_load_prev_emotion_none),
+        ("z3_load_prev_emotion_full", _self_test_z3_load_prev_emotion_full),
+        ("z3_format_emotion_block", _self_test_z3_format_emotion_block),
+        ("z3_emotion_curve_disabled", _self_test_z3_emotion_curve_disabled),
     ]
     for name, coro_fn in tests:
         try:

@@ -641,9 +641,14 @@ class OneToManyContextBuilder:
         self,
         chapter: Chapter,
         project_id: str,
-        db: AsyncSession
+        db: AsyncSession,
+        include_emotion_trend: bool = False,
     ) -> Optional[str]:
-        """构建最近10章上下文（三段式回退：分析摘要 → 大纲规划 → 生成摘要）"""
+        """构建最近10章上下文（三段式回退：分析摘要 → 大纲规划 → 生成摘要）
+
+        Z.3: include_emotion_trend=True 时, 在块顶部加一行"情感趋势 (近N章)",
+        汇总各章 emotional_tone + intensity, 防止跨章节情感断裂.
+        """
         try:
             result = await db.execute(
                 select(Chapter.id, Chapter.chapter_number, Chapter.title, Chapter.expansion_plan, Chapter.summary)
@@ -750,6 +755,12 @@ class OneToManyContextBuilder:
                             lines.append(f"第{ch_num}章《{ch_title}》：{summary[:100]}")
                 elif summary:
                     lines.append(f"第{ch_num}章《{ch_title}》：{summary[:100]}")
+
+            # Z.3: 跨章情感趋势 (单行 summary) —— 拼到 lines 顶部
+            if include_emotion_trend:
+                trend_line = self._build_emotional_trend(analysis_map, recent_chapters)
+                if trend_line:
+                    lines.insert(1, trend_line)
 
             if len(lines) <= 1:
                 return None
@@ -942,6 +953,36 @@ class OneToManyContextBuilder:
             return None
     
     @staticmethod
+    def _build_emotional_trend(
+        analysis_map: Dict[str, Any],
+        recent_chapters: list,
+    ) -> str:
+        """Z.3: 跨章情感趋势单行 summary.
+
+        输入: analysis_map {chapter_id: {emotional_tone, emotional_intensity, ...}}
+              recent_chapters [(chapter_id, chapter_number, ...), ...] (按 chapter_number 升序)
+        输出: "情感趋势 (近N章): ch1[紧张 0.3] -> ch2[温馨 0.5] -> ..."
+        任意章没有 emotional_tone/emotional_intensity, 跳过该章.
+        """
+        ordered = sorted(recent_chapters, key=lambda r: r[1])
+        trend_parts = []
+        for ch_id, ch_num, _title, _plan, _summary in ordered:
+            a = analysis_map.get(ch_id)
+            if not a:
+                continue
+            tone = a.get("emotional_tone")
+            intensity = a.get("emotional_intensity")
+            if not tone and intensity is None:
+                continue
+            seg = f"ch{ch_num}[{tone or '-'}"
+            if intensity is not None:
+                seg += f" {float(intensity):.1f}"
+            seg += "]"
+            trend_parts.append(seg)
+        if not trend_parts:
+            return ""
+        return f"情感趋势 (近{len(trend_parts)}章): " + " -> ".join(trend_parts)
+
     def _format_plot_analysis_block(analysis: Dict[str, Any], chapter_number: int) -> str:
         """
         Batch 1: 把 PlotAnalysis 行的非 plot_points/character_states 字段
