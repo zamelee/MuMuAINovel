@@ -1,13 +1,9 @@
-import { useState, useEffect, useRef } from 'react';
-import { List, Button, Checkbox, Modal, Form, Input, Select, message, Empty, Space, Badge, Tag, Card, InputNumber, Alert, Radio, Descriptions, Collapse, Popconfirm, Pagination, theme, Tooltip } from 'antd';
+import { useState, useEffect } from 'react';
+import { List, Button, Checkbox, Modal, Form, Input, Select, message, Empty, Space, Badge, Tag, InputNumber, Alert, Radio, Collapse, Popconfirm, Pagination, theme, Tooltip } from 'antd';
 import { EditOutlined, FileTextOutlined, ThunderboltOutlined, LockOutlined, DownloadOutlined, SettingOutlined, FundOutlined, SyncOutlined, CloseCircleOutlined, RocketOutlined, StopOutlined, InfoCircleOutlined, CaretRightOutlined, DeleteOutlined, BookOutlined, FormOutlined, PlusOutlined, ReadOutlined } from '@ant-design/icons';
 import { useStore } from '../store';
-import { eventBus } from '../store/eventBus';
 import { useChapterSync } from '../store/hooks';
-import { generateChapterBackground } from '../services/backgroundTaskService';
-import { projectApi, writingStyleApi, chapterApi } from '../services/api';
-import type { Chapter, ChapterUpdate, ApiError, WritingStyle, ExpansionPlanData } from '../types';
-import type { TextAreaRef } from 'antd/es/input/TextArea';
+import { projectApi } from '../services/api';
 import ChapterAnalysis from '../components/ChapterAnalysis';
 import ExpansionPlanEditor from '../components/ExpansionPlanEditor';
 import { SSELoadingOverlay } from '../components/SSELoadingOverlay';
@@ -17,18 +13,16 @@ import PartialRegenerateModal from '../components/PartialRegenerateModal';
 import { useChapterList } from './chapters/hooks/useChapterList';
 import { useChapterAnalysis } from './chapters/hooks/useChapterAnalysis';
 import { useChapterReader } from './chapters/hooks/useChapterReader';
+import { useChapterCRUD } from './chapters/hooks/useChapterCRUD.tsx';
+import { useGenerateChapter } from './chapters/hooks/useGenerateChapter.tsx';
+import { useAutoAnalysis } from './chapters/hooks/useAutoAnalysis';
+import type { StreamGenerateFn as UseGenerateChapterStreamFn } from './chapters/hooks/useGenerateChapter.tsx';
 
 const { TextArea } = Input;
 
 // localStorage 缓存键名
 const WORD_COUNT_CACHE_KEY = 'chapter_default_word_count';
 const DEFAULT_WORD_COUNT = 3000;
-const CHAR_TOKEN_RATIO_CACHE_KEY = "chapter_char_token_ratio";
-const DEFAULT_CHAR_TOKEN_RATIO = 1.5;
-const QUICK_CHECK_STRATEGY_KEY = "quick_check_strategy";
-const QUICK_CHECK_THRESHOLD_KEY = "quick_check_threshold";
-const DEFAULT_QUICK_CHECK_STRATEGY = "A+B";
-const DEFAULT_QUICK_CHECK_THRESHOLD = 0.70;
 
 // 从 localStorage 读取缓存的字数
 const getCachedWordCount = (): number => {
@@ -55,104 +49,21 @@ const setCachedWordCount = (value: number): void => {
   }
 };
 
-const getCachedCharTokenRatio = (): number => {
-  try {
-    const cached = localStorage.getItem(CHAR_TOKEN_RATIO_CACHE_KEY);
-    if (cached) {
-      const value = parseFloat(cached);
-      if (!isNaN(value) && value >= 1.0 && value <= 5.0) return value;
-    }
-  } catch (error) { console.warn("getCachedCharTokenRatio failed:", error); }
-  return DEFAULT_CHAR_TOKEN_RATIO;
-};
+const CHAR_TOKEN_RATIO_CACHE_KEY = "chapter_char_token_ratio";
+const QUICK_CHECK_STRATEGY_KEY = "quick_check_strategy";
+const QUICK_CHECK_THRESHOLD_KEY = "quick_check_threshold";
 
 const setCachedCharTokenRatio = (value: number): void => {
   try { localStorage.setItem(CHAR_TOKEN_RATIO_CACHE_KEY, String(value)); }
   catch (error) { console.warn("setCachedCharTokenRatio failed:", error); }
 };
-
-const getCachedQuickCheckStrategy = (): string => {
-  try {
-    const cached = localStorage.getItem(QUICK_CHECK_STRATEGY_KEY);
-    if (cached && ["A", "B", "A+B"].includes(cached)) return cached;
-  } catch (error) { console.warn("getCachedQuickCheckStrategy failed:", error); }
-  return DEFAULT_QUICK_CHECK_STRATEGY;
-};
-
-const getCachedQuickCheckThreshold = (): number => {
-  try {
-    const cached = localStorage.getItem(QUICK_CHECK_THRESHOLD_KEY);
-    if (cached) { const value = parseFloat(cached); if (!isNaN(value) && value >= 0.3 && value <= 1.0) return value; }
-  } catch (error) { console.warn("getCachedQuickCheckThreshold failed:", error); }
-  return DEFAULT_QUICK_CHECK_THRESHOLD;
-};
-
 export default function Chapters() {
   const { currentProject, chapters, outlines, setCurrentChapter, setCurrentProject } = useStore();
   const [modal, contextHolder] = Modal.useModal();
   const { token } = theme.useToken();
-  const [isModalOpen, setIsModalOpen] = useState(false);
-  const [isEditorOpen, setIsEditorOpen] = useState(false);
-  const [isContinuing, setIsContinuing] = useState(false);
-  const [isGenerating, setIsGenerating] = useState(false);
+  // editingId 跨 useChapterCRUD 与 useGenerateChapter 共享（main 持有 state, 两 hook 接收 setter）
   const [editingId, setEditingId] = useState<string | null>(null);
-  const [form] = Form.useForm();
-  const [editorForm] = Form.useForm();
-  const editorContent = Form.useWatch('content', editorForm);
   const [isMobile, setIsMobile] = useState(window.innerWidth <= 768);
-  const contentTextAreaRef = useRef<TextAreaRef>(null);
-  const [writingStyles, setWritingStyles] = useState<WritingStyle[]>([]);
-  const [selectedStyleId, setSelectedStyleId] = useState<number | undefined>();
-  const [targetWordCount, setTargetWordCount] = useState<number>(getCachedWordCount);
-  const [availableModels, setAvailableModels] = useState<Array<{ value: string, label: string }>>([]);
-  const [selectedModel, setSelectedModel] = useState<string | undefined>();
-  const [batchSelectedModel, setBatchSelectedModel] = useState<string | undefined>(); // 批量生成的模型选择
-  const [batchSelectedSkillKey, setBatchSelectedSkillKey] = useState<string | undefined>(); // 批量生成的Skill选择
-  const [temporaryNarrativePerspective, setTemporaryNarrativePerspective] = useState<string | undefined>(); // 临时人称选择
-  const [availableSkills, setAvailableSkills] = useState<Array<{ template_key: string; template_name: string; description: string; category: string }>>([]);
-  const [selectedSkillKey, setSelectedSkillKey] = useState<string | undefined>();
-  // 规划编辑状态
-  const [planEditorVisible, setPlanEditorVisible] = useState(false);
-  const [editingPlanChapter, setEditingPlanChapter] = useState<Chapter | null>(null);
-
-  // 单章节生成进度状态
-  const [singleChapterProgress, setSingleChapterProgress] = useState(0);
-  const [singleChapterProgressMessage, setSingleChapterProgressMessage] = useState('');
-
-  // 字元比状态
-  const [charTokenRatio, setCharTokenRatio] = useState<number>(getCachedCharTokenRatio);
-
-  // 初步检测状态
-  const [quickCheckResult, setQuickCheckResult] = useState<{ anchor_score?: number | null; boundary_ok?: boolean; summary?: string } | null>(null);
-  const [quickCheckStrategy, setQuickCheckStrategy] = useState<string>(getCachedQuickCheckStrategy);
-  const [quickCheckThreshold, setQuickCheckThreshold] = useState<number>(getCachedQuickCheckThreshold);
-  const [recheckingAnchor, setRecheckingAnchor] = useState(false);
-
-  // 自动分析状态
-  const [autoAnalysisEnabled, setAutoAnalysisEnabled] = useState(() => {
-    try { return localStorage.getItem('auto_analysis_enabled') !== 'false'; } catch { return true; }
-  });
-  const [autoAnalysisDelay, setAutoAnalysisDelay] = useState(() => {
-    try { const v = parseInt(localStorage.getItem('auto_analysis_delay') || '30'); return v >= 10 && v <= 120 ? v : 30; } catch { return 30; }
-  });
-  const [chapterCountdowns, setChapterCountdowns] = useState<Record<string, number>>({});
-  const countdownIntervalsRef = useRef<Record<string, ReturnType<typeof setInterval>>>({});
-
-
-  // 批量生成相关状态
-  const [batchGenerateVisible, setBatchGenerateVisible] = useState(false);
-  const [batchGenerating, setBatchGenerating] = useState(false);
-  const [batchTaskId, setBatchTaskId] = useState<string | null>(null);
-  const [batchForm] = Form.useForm();
-  const [manualCreateForm] = Form.useForm();
-  const [batchProgress, setBatchProgress] = useState<{
-    status: string;
-    total: number;
-    completed: number;
-    current_chapter_number: number | null;
-    estimated_time_minutes?: number;
-  } | null>(null);
-  const batchPollingIntervalRef = useRef<number | null>(null);
 
   useEffect(() => {
     const handleResize = () => {
@@ -162,6 +73,26 @@ export default function Chapters() {
     window.addEventListener('resize', handleResize);
     return () => window.removeEventListener('resize', handleResize);
   }, []);
+
+  const getStatusColor = (status: string) => {
+    const colors: Record<string, string> = {
+      'draft': 'default',
+      'pending': 'warning',
+      'writing': 'processing',
+      'completed': 'success',
+    };
+    return colors[status] || 'default';
+  };
+
+  const getStatusText = (status: string) => {
+    const texts: Record<string, string> = {
+      'draft': '草稿',
+      'pending': '待处理',
+      'writing': '创作中',
+      'completed': '已完成',
+    };
+    return texts[status] || status;
+  };
 
   // ===== Phase 3a hooks =====
   // useChapterAnalysis 必须在 useChapterList 之前（list 需要 analysisTasksMap）
@@ -193,6 +124,116 @@ export default function Chapters() {
     getGenerateDisabledReason,
   } = useChapterList(chapters, analysisTasksMap, currentProject?.outline_mode);
 
+
+  // ===== Phase 3b hooks =====
+
+  // useChapterSync (来自 store) — 抽取 refreshChapters/updateChapter/generateChapterContentStream
+  const {
+    refreshChapters,
+    updateChapter,
+    generateChapterContentStream
+  } = useChapterSync();
+
+  // useChapterCRUD: 小 modal + 删除 + 手动创建 + 规划编辑器 + 展开规划查看
+  const {
+    isModalOpen, setIsModalOpen,
+    form,
+    planEditorVisible, setPlanEditorVisible,
+    editingPlanChapter, setEditingPlanChapter,
+    handleOpenModal,
+    handleSubmit,
+    handleDeleteChapter,
+    handleOpenPlanEditor,
+    handleSavePlan,
+    showManualCreateChapterModal,
+    showExpansionPlanModal,
+  } = useChapterCRUD({
+    modal,
+    chapters,
+    currentProjectId: currentProject?.id ?? '',
+    refreshChapters: refreshChapters as () => Promise<unknown>,
+    updateChapter,
+    setCurrentProject: setCurrentProject as (project: unknown) => void,
+    isMobile,
+    token,
+    getStatusText,
+    outlines,
+  });
+
+  // useAutoAnalysis: 自动分析开关 + 倒计时
+  const {
+    autoAnalysisEnabled, setAutoAnalysisEnabled,
+    autoAnalysisDelay, setAutoAnalysisDelay,
+    chapterCountdowns,
+    clearAllCountdowns,
+    cancelChapterCountdown,
+    startChapterCountdown,
+  } = useAutoAnalysis({ startPollingTask });
+
+
+  // useGenerateChapter: 编辑器 + 单章节 AI + 初步检测 + 批量生成
+  const {
+    isEditorOpen, setIsEditorOpen,
+    editorForm,
+    editorContent,
+    contentTextAreaRef,
+    isContinuing,
+    isGenerating,
+    writingStyles,
+    selectedStyleId, setSelectedStyleId,
+    targetWordCount, setTargetWordCount,
+    availableModels,
+    selectedModel, setSelectedModel,
+    batchSelectedModel, setBatchSelectedModel,
+    batchSelectedSkillKey, setBatchSelectedSkillKey,
+    availableSkills,
+    selectedSkillKey, setSelectedSkillKey,
+    temporaryNarrativePerspective, setTemporaryNarrativePerspective,
+    singleChapterProgress,
+    singleChapterProgressMessage,
+    charTokenRatio, setCharTokenRatio,
+    quickCheckResult,
+    quickCheckStrategy, setQuickCheckStrategy,
+    quickCheckThreshold, setQuickCheckThreshold,
+    recheckingAnchor,
+    batchGenerateVisible, setBatchGenerateVisible,
+    batchGenerating,
+    batchForm,
+    batchProgress,
+    getNarrativePerspectiveText,
+    loadWritingStyles,
+    handleOpenEditor,
+    handleEditorSubmit,
+    handleRecheckAnchor,
+    showGenerateModal,
+    handleBackgroundGenerate,
+    handleBatchGenerate,
+    handleCancelBatchGenerate,
+    handleOpenBatchGenerate,
+    checkAndRestoreBatchTask,
+  } = useGenerateChapter({
+    modal,
+    currentProjectId: currentProject?.id ?? null,
+    currentProjectTitle: currentProject?.title ?? '',
+    chapters,
+    sortedChapters,
+    canGenerateChapter,
+    getGenerateDisabledReason,
+    refreshChapters,
+    updateChapter,
+    setCurrentChapter,
+    setCurrentProject: setCurrentProject as (project: unknown) => void,
+    loadAnalysisTasks,
+    isMobile,
+    startChapterCountdown,
+    autoAnalysisEnabled: true,
+    autoAnalysisDelay: 30,
+    token,
+    editingId,
+    setEditingId,
+    getCachedWordCount,
+    streamGenerate: generateChapterContentStream as UseGenerateChapterStreamFn,
+  });
   // useChapterReader: 阅读器 + 局部重写（依赖 isEditorOpen/isGenerating/contentTextAreaRef/editorForm）
   const {
     readerVisible, setReaderVisible,
@@ -214,16 +255,6 @@ export default function Chapters() {
     editorForm,
   });
 
-
-
-
-  const {
-    refreshChapters,
-    updateChapter,
-    deleteChapter,
-    generateChapterContentStream
-  } = useChapterSync();
-
   useEffect(() => {
     if (currentProject?.id) {
       refreshChapters();
@@ -234,508 +265,6 @@ export default function Chapters() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [currentProject?.id]);
 
-  // 清理轮询定时器
-  useEffect(() => {
-    const batchPollingInterval = batchPollingIntervalRef.current;
-    return () => {
-      if (batchPollingInterval) {
-        clearInterval(batchPollingInterval);
-      }
-    };
-  }, []);
-
-
-  const loadWritingStyles = async () => {
-    if (!currentProject?.id) return;
-
-    try {
-      const response = await writingStyleApi.getProjectStyles(currentProject.id);
-      setWritingStyles(response.styles);
-
-      // 设置默认风格为初始选中
-      const defaultStyle = response.styles.find(s => s.is_default);
-      if (defaultStyle) {
-        setSelectedStyleId(defaultStyle.id);
-      }
-    } catch (error) {
-      console.error('加载写作风格失败:', error);
-      message.error('加载写作风格失败');
-    }
-  };
-
-  // 加载可用的 Skill 列表
-  const loadAvailableSkills = async () => {
-    try {
-      const response = await fetch('/api/skills/list');
-      if (response.ok) {
-        const data = await response.json();
-        if (Array.isArray(data)) {
-          setAvailableSkills(data);
-        }
-      }
-    } catch (error) {
-      console.error('加载 Skill 列表失败:', error);
-    }
-  };
-
-  const loadAvailableModels = async () => {
-    try {
-      // 从设置API获取用户配置的模型列表
-      const settingsResponse = await fetch('/api/settings');
-      if (settingsResponse.ok) {
-        const settings = await settingsResponse.json();
-        const { api_key, api_base_url, api_provider } = settings;
-
-        if (api_base_url) {
-          try {
-            const modelsResponse = await fetch(
-              `/api/settings/models?api_key=${encodeURIComponent(api_key || '')}&api_base_url=${encodeURIComponent(api_base_url)}&provider=${api_provider}`
-            );
-            if (modelsResponse.ok) {
-              const data = await modelsResponse.json();
-              if (data.models && data.models.length > 0) {
-                setAvailableModels(data.models);
-                // 设置默认模型为当前配置的模型
-                setSelectedModel(settings.llm_model);
-                return settings.llm_model; // 返回模型名称
-              }
-            }
-          } catch {
-            console.log('获取模型列表失败，将使用默认模型');
-          }
-        }
-      }
-    } catch (error) {
-      console.error('加载可用模型失败:', error);
-    }
-    return null;
-  };
-
-  // 检查并恢复批量生成任务
-  const checkAndRestoreBatchTask = async () => {
-    if (!currentProject?.id) return;
-
-    try {
-      const response = await fetch(`/api/chapters/project/${currentProject.id}/batch-generate/active`);
-      if (!response.ok) return;
-
-      const data = await response.json();
-
-      if (data.has_active_task && data.task) {
-        const task = data.task;
-
-        // 恢复任务状态（只在顶部进度条显示，不弹出Modal）
-        setBatchTaskId(task.batch_id);
-        setBatchProgress({
-          status: task.status,
-          total: task.total,
-          completed: task.completed,
-          current_chapter_number: task.current_chapter_number,
-        });
-        setBatchGenerating(true);
-        // 不设置 setBatchGenerateVisible(true)，避免弹出Modal遮挡页面
-
-        // 启动轮询
-        startBatchPolling(task.batch_id);
-
-        message.info('检测到未完成的批量生成任务，请查看任务列表');
-      }
-    } catch (error) {
-      console.error('检查批量生成任务失败:', error);
-    }
-  };
-
-  // 🔔 显示浏览器通知
-  const showBrowserNotification = (title: string, body: string, type: 'success' | 'error' | 'info' = 'info') => {
-    // 检查浏览器是否支持通知
-    if (!('Notification' in window)) {
-      console.log('浏览器不支持通知功能');
-      return;
-    }
-
-    // 检查通知权限
-    if (Notification.permission === 'granted') {
-      // 选择图标
-      const icon = type === 'success' ? '/logo.svg' : type === 'error' ? '/favicon.ico' : '/logo.svg';
-      
-      const notification = new Notification(title, {
-        body,
-        icon,
-        badge: '/favicon.ico',
-        tag: 'batch-generation', // 相同tag会替换旧通知
-        requireInteraction: false, // 自动关闭
-        silent: false, // 播放提示音
-      });
-
-      // 点击通知时聚焦到窗口
-      notification.onclick = () => {
-        window.focus();
-        notification.close();
-      };
-
-      // 5秒后自动关闭
-      setTimeout(() => {
-        notification.close();
-      }, 5000);
-    } else if (Notification.permission !== 'denied') {
-      // 如果权限未被明确拒绝，尝试请求权限
-      Notification.requestPermission().then(permission => {
-        if (permission === 'granted') {
-          showBrowserNotification(title, body, type);
-        }
-      });
-    }
-  };
-
-
-  if (!currentProject) return null;
-
-  // 获取人称的中文显示文本（同时支持中英文值）
-  const getNarrativePerspectiveText = (perspective?: string): string => {
-    const texts: Record<string, string> = {
-      // 英文值映射（向后兼容）
-      'first_person': '第一人称（我）',
-      'third_person': '第三人称（他/她）',
-      'omniscient': '全知视角',
-      // 中文值映射（项目设置使用）
-      '第一人称': '第一人称（我）',
-      '第三人称': '第三人称（他/她）',
-      '全知视角': '全知视角',
-    };
-    return texts[perspective || ''] || '第三人称（默认）';
-  };
-
-  const handleOpenModal = (id: string) => {
-    const chapter = chapters.find(c => c.id === id);
-    if (chapter) {
-      form.setFieldsValue(chapter);
-      setEditingId(id);
-      setIsModalOpen(true);
-    }
-  };
-
-  const handleSubmit = async (values: ChapterUpdate) => {
-    if (!editingId) return;
-
-    try {
-      await updateChapter(editingId, values);
-
-      // 刷新章节列表以获取完整的章节数据（包括outline_title等联查字段）
-      await refreshChapters();
-
-      message.success('章节更新成功');
-      setIsModalOpen(false);
-      form.resetFields();
-    } catch {
-      message.error('操作失败');
-    }
-  };
-
-  const handleOpenEditor = (id: string) => {
-    const chapter = chapters.find(c => c.id === id);
-    if (chapter) {
-      setCurrentChapter(chapter);
-      editorForm.setFieldsValue({
-        title: chapter.title,
-        content: chapter.content,
-      });
-      setEditingId(id);
-      setQuickCheckResult(null);
-      setTemporaryNarrativePerspective(undefined); // 重置人称选择
-      setSelectedSkillKey(undefined); // 重置Skill选择
-      setIsEditorOpen(true);
-      // 打开编辑窗口时加载模型列表和Skill列表
-      loadAvailableModels();
-      loadAvailableSkills();
-      // 读取已持久化的锚点分数
-      chapterApi.getAnchorScore(id).then(res => {
-        if (res.anchor_compliance_score != null) {
-          setQuickCheckResult(prev => ({ ...prev, anchor_score: res.anchor_compliance_score }));
-        }
-      }).catch(() => {});
-    }
-  };
-
-  const handleRecheckAnchor = async () => {
-    if (!editingId) return;
-    setRecheckingAnchor(true);
-    try {
-      const result = await chapterApi.checkAnchor(editingId, { strategy: quickCheckStrategy, threshold: quickCheckThreshold });
-      if (result.compliance_score != null) {
-        setQuickCheckResult(prev => ({ ...prev, anchor_score: result.compliance_score, summary: result.suggestion || prev?.summary || '' }));
-        message.success('锚点检测完成，得分: ' + result.compliance_score + '/10');
-      }
-    } catch (err) { message.error('重新检测失败'); }
-    finally { setRecheckingAnchor(false); }
-  };
-
-  const cancelChapterCountdown = (chapterId: string) => {
-    if (countdownIntervalsRef.current[chapterId]) {
-      clearInterval(countdownIntervalsRef.current[chapterId]);
-      delete countdownIntervalsRef.current[chapterId];
-    }
-    setChapterCountdowns(prev => { const next = { ...prev }; delete next[chapterId]; return next; });
-    // 注意：analysisTasksMap 不再需要在这里清理本地 pending task ——
-    // 因为我们不在倒计时开始时把 task 写进 analysisTasksMap。
-    // 后端那个 pending task 由 30 分钟孤儿清理回收。
-  };
-
-  const startChapterCountdown = (chapterId: string) => {
-    cancelChapterCountdown(chapterId);
-    setChapterCountdowns(prev => ({ ...prev, [chapterId]: autoAnalysisDelay }));
-    countdownIntervalsRef.current[chapterId] = setInterval(() => {
-      setChapterCountdowns(prev => {
-        const current = prev[chapterId];
-        if (current === undefined || current <= 1) {
-          clearInterval(countdownIntervalsRef.current[chapterId]);
-          delete countdownIntervalsRef.current[chapterId];
-          chapterApi.startAnalysis(chapterId).then(() => startPollingTask(chapterId)).catch(() => {});
-          const next = { ...prev }; delete next[chapterId]; return next;
-        }
-        return { ...prev, [chapterId]: current - 1 };
-      });
-    }, 1000);
-  };
-
-  const handleEditorSubmit = async (values: ChapterUpdate) => {
-    if (!editingId || !currentProject) return;
-
-    try {
-      await updateChapter(editingId, values);
-
-      // 刷新项目信息以更新总字数统计
-      const updatedProject = await projectApi.getProject(currentProject.id);
-      setCurrentProject(updatedProject);
-
-      message.success('章节保存成功');
-      setIsEditorOpen(false);
-    } catch {
-      message.error('保存失败');
-    }
-  };
-
-  const handleGenerate = async () => {
-    if (!editingId) return;
-
-    try {
-      setIsContinuing(true);
-      setIsGenerating(true);
-      setSingleChapterProgress(0);
-      setSingleChapterProgressMessage('准备开始生成...');
-
-      const result = await generateChapterContentStream(
-        editingId,
-        (content) => {
-          editorForm.setFieldsValue({ content });
-
-          if (contentTextAreaRef.current) {
-            const textArea = contentTextAreaRef.current.resizableTextArea?.textArea;
-            if (textArea) {
-              textArea.scrollTop = textArea.scrollHeight;
-            }
-          }
-        },
-        selectedStyleId,
-        targetWordCount,
-        (progressMsg, progressValue) => {
-          // 进度回调
-          setSingleChapterProgress(progressValue);
-          setSingleChapterProgressMessage(progressMsg);
-        },
-        selectedModel,  // 传递选中的模型
-        temporaryNarrativePerspective,  // 传递临时人称参数
-        selectedSkillKey  // 传递选中的Skill
-      );
-
-      // 后端已经创建了 analysis_task（result.analysis_task_id），但本地的
-      // analysisTasksMap 不要在这里就乐观写入。理由：
-      //   - autoAnalysisEnabled=true  → 倒计时结束才调 chapterApi.startAnalysis，
-      //     启动后由 startPollingTask 把 task 状态从后端拉进来即可。
-      //   - autoAnalysisEnabled=false → 用户没确认要做分析，前端不该显示
-      //     'isAnalyzing=true'，后端 task 由孤儿清理回收。
-      // 这样按钮的 isAnalyzing 判断只反映后端真实状态 'running'，
-      // 倒计时期间按钮不会被错误地 disable。
-      if (result && autoAnalysisEnabled) {
-        if (autoAnalysisEnabled) {
-          message.success('AI创作成功！' + autoAnalysisDelay + '秒后自动开始分析');
-          startChapterCountdown(editingId);
-        } else {
-          message.success('AI创作成功！初步检测已完成，可手动启动LLM分析');
-        }
-      } else {
-        message.success('AI创作成功！');
-      }
-    } catch (error) {
-      const apiError = error as ApiError;
-      message.error('AI创作失败：' + (apiError.response?.data?.detail || apiError.message || '未知错误'));
-    } finally {
-      setIsContinuing(false);
-      setIsGenerating(false);
-      setSingleChapterProgress(0);
-      setSingleChapterProgressMessage('');
-    }
-  };
-
-  const showGenerateModal = (chapter: Chapter) => {
-    const previousChapters = chapters.filter(
-      c => c.chapter_number < chapter.chapter_number
-    ).sort((a, b) => a.chapter_number - b.chapter_number);
-
-    const selectedStyle = writingStyles.find(s => s.id === selectedStyleId);
-
-    const instance = modal.confirm({
-      title: 'AI创作章节内容',
-      width: 700,
-      centered: true,
-      content: (
-        <div style={{ marginTop: 16 }}>
-          <p>AI将根据以下信息创作本章内容：</p>
-          <ul>
-            <li>章节大纲和要求</li>
-            <li>项目的世界观设定</li>
-            <li>相关角色信息</li>
-            <li><strong>前面已完成章节的内容（确保剧情连贯）</strong></li>
-            {selectedStyle && (
-              <li><strong>写作风格：{selectedStyle.name}</strong></li>
-            )}
-            <li><strong>目标字数：{targetWordCount}字</strong></li>
-          </ul>
-
-          {previousChapters.length > 0 && (
-            <div style={{
-              marginTop: 16,
-              padding: 12,
-              background: token.colorInfoBg,
-              borderRadius: token.borderRadius,
-              border: `1px solid ${token.colorInfoBorder}`
-            }}>
-              <div style={{ marginBottom: 8, fontWeight: 500, color: token.colorPrimary }}>
-                📚 将引用的前置章节（共{previousChapters.length}章）：
-              </div>
-              <div style={{ maxHeight: 150, overflowY: 'auto' }}>
-                {previousChapters.map(ch => (
-                  <div key={ch.id} style={{ padding: '4px 0', fontSize: 13 }}>
-                    ✓ 第{ch.chapter_number}章：{ch.title} ({ch.word_count || 0}字)
-                  </div>
-                ))}
-              </div>
-              <div style={{ marginTop: 8, fontSize: 12, color: token.colorTextSecondary }}>
-                💡 AI会参考这些章节内容，确保情节连贯、角色状态一致
-              </div>
-            </div>
-          )}
-
-          <p style={{ color: token.colorError, marginTop: 16, marginBottom: 0 }}>
-            ⚠️ 注意：此操作将覆盖当前章节内容
-          </p>
-        </div>
-      ),
-      okText: '开始创作',
-      okButtonProps: { danger: true },
-      cancelText: '取消',
-      onOk: async () => {
-        instance.update({
-          okButtonProps: { danger: true, loading: true },
-          cancelButtonProps: { disabled: true },
-          closable: false,
-          maskClosable: false,
-          keyboard: false,
-        });
-
-        try {
-          if (!selectedStyleId) {
-            message.error('请先选择写作风格');
-            instance.update({
-              okButtonProps: { danger: true, loading: false },
-              cancelButtonProps: { disabled: false },
-              closable: true,
-              maskClosable: true,
-              keyboard: true,
-            });
-            return;
-          }
-          await handleGenerate();
-          instance.destroy();
-        } catch {
-          instance.update({
-            okButtonProps: { danger: true, loading: false },
-            cancelButtonProps: { disabled: false },
-            closable: true,
-            maskClosable: true,
-            keyboard: true,
-          });
-        }
-      },
-      onCancel: () => {
-        if (isGenerating) {
-          message.warning('AI正在创作中，请等待完成');
-          return false;
-        }
-      },
-    });
-  };
-
-
-  // 后台生成章节（关闭浏览器也不影响）
-  // 不再强制显示进度弹窗，任务进度在右下角悬浮任务框中显示
-  const handleBackgroundGenerate = async () => {
-    if (!editingId) return;
-    if (!selectedStyleId) {
-      message.error("请先选择写作风格");
-      return;
-    }
-
-    try {
-      await generateChapterBackground(
-        editingId,
-        {
-          style_id: selectedStyleId,
-          target_word_count: targetWordCount,
-          model: selectedModel,
-          narrative_perspective: temporaryNarrativePerspective,
-        },
-        () => {
-          // 进度更新由悬浮任务框处理，无需额外操作
-        },
-        (_) => {
-          message.success("后台章节生成完成！");
-          refreshChapters();
-          if (currentProject) {
-            projectApi.getProject(currentProject.id).then(setCurrentProject).catch(console.error);
-          }
-          loadAnalysisTasks();
-        },
-        (error) => {
-          message.error("后台生成失败: " + error);
-        }
-      );
-
-      message.info("章节生成任务已提交，可在右下角任务面板查看进度");
-      // 通知悬浮任务框刷新
-      eventBus.emit('background-task-created');
-    } catch (error) {
-      message.error("创建后台任务失败");
-    }
-  };
-  const getStatusColor = (status: string) => {
-    const colors: Record<string, string> = {
-      'draft': 'default',
-      'pending': 'warning',
-      'writing': 'processing',
-      'completed': 'success',
-    };
-    return colors[status] || 'default';
-  };
-
-  const getStatusText = (status: string) => {
-    const texts: Record<string, string> = {
-      'draft': '草稿',
-      'pending': '待处理',
-      'writing': '创作中',
-      'completed': '已完成',
-    };
-    return texts[status] || status;
-  };
 
   const handleExport = () => {
     if (chapters.length === 0) {
@@ -743,15 +272,20 @@ export default function Chapters() {
       return;
     }
 
+    if (!currentProject) {
+      message.warning('当前项目未加载，无法导出');
+      return;
+    }
+
     modal.confirm({
       title: '导出项目章节',
-      content: `确定要将《${currentProject.title}》的所有章节导出为TXT文件吗？`,
+      content: `确定要将《${currentProject?.title}》的所有章节导出为TXT文件吗？`,
       centered: true,
       okText: '确定导出',
       cancelText: '取消',
       onOk: () => {
         try {
-          projectApi.exportProject(currentProject.id);
+          projectApi.exportProject(currentProject?.id);
           message.success('开始下载导出文件');
         } catch {
           message.error('导出失败，请重试');
@@ -761,751 +295,11 @@ export default function Chapters() {
   };
 
 
+
   // 一键按章节顺序分析未分析章节
 
-  // 批量生成函数
-  const handleBatchGenerate = async (values: {
-    startChapterNumber: number;
-    count: number;
-    enableAnalysis: boolean;
-    styleId?: number;
-    targetWordCount?: number;
-    model?: string;
-  }) => {
-    if (!currentProject?.id) return;
-
-    // 调试日志
-    console.log('[批量生成] 表单values:', values);
-    console.log('[批量生成] batchSelectedModel状态:', batchSelectedModel);
-
-    // 使用批量生成对话框中选择的风格和字数，如果没有选择则使用默认值
-    const styleId = values.styleId || selectedStyleId;
-    const wordCount = values.targetWordCount || targetWordCount;
-
-    // 使用批量生成专用的模型状态
-    const model = batchSelectedModel;
-
-    console.log('[批量生成] 最终使用的model:', model);
-
-    if (!styleId) {
-      message.error('请选择写作风格');
-      return;
-    }
-
-    try {
-      setBatchGenerating(true);
-      setBatchGenerateVisible(false); // 关闭配置对话框，任务进度在悬浮任务框中显示
-
-      const requestBody: {
-        start_chapter_number: number;
-        count: number;
-        enable_analysis: boolean;
-        style_id: number;
-        target_word_count: number;
-        model?: string;
-        skill_key?: string;
-      } = {
-        start_chapter_number: values.startChapterNumber,
-        count: values.count,
-        enable_analysis: true,
-        style_id: styleId,
-        target_word_count: wordCount,
-      };
-
-      // 如果有模型参数，添加到请求体中
-      if (model) {
-        requestBody.model = model;
-        console.log('[批量生成] 请求体包含model:', model);
-      } else {
-        console.log('[批量生成] 请求体不包含model，使用后端默认模型');
-      }
-
-      // 如果有 Skill 参数，添加到请求体中
-      if (batchSelectedSkillKey) {
-        requestBody.skill_key = batchSelectedSkillKey;
-        console.log('[批量生成] 请求体包含skill_key:', batchSelectedSkillKey);
-      }
-
-      console.log('[批量生成] 完整请求体:', JSON.stringify(requestBody, null, 2));
-
-      const response = await fetch(`/api/chapters/project/${currentProject.id}/batch-generate`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(requestBody),
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.detail || '创建批量生成任务失败');
-      }
-
-      const result = await response.json();
-      setBatchTaskId(result.batch_id);
-      setBatchProgress({
-        status: 'running',
-        total: result.chapters_to_generate.length,
-        completed: 0,
-        current_chapter_number: values.startChapterNumber,
-        estimated_time_minutes: result.estimated_time_minutes,
-      });
-
-      message.success(`批量生成任务已创建，预计需要 ${result.estimated_time_minutes} 分钟，可在右下角任务面板查看进度`);
-      // 通知悬浮任务框刷新
-      eventBus.emit('background-task-created');
-
-      // 🔔 触发浏览器通知（任务开始）
-      showBrowserNotification(
-        '批量生成已启动',
-        `开始生成 ${result.chapters_to_generate.length} 章，预计需要 ${result.estimated_time_minutes} 分钟`,
-        'info'
-      );
-
-      // 开始轮询任务状态
-      startBatchPolling(result.batch_id);
-
-    } catch (error: unknown) {
-      const err = error as Error;
-      message.error('创建批量生成任务失败：' + (err.message || '未知错误'));
-      setBatchGenerating(false);
-      setBatchGenerateVisible(false);
-    }
-  };
-
-  // 轮询批量生成任务状态
-  const startBatchPolling = (taskId: string) => {
-    if (batchPollingIntervalRef.current) {
-      clearInterval(batchPollingIntervalRef.current);
-    }
-
-    const poll = async () => {
-      try {
-        const response = await fetch(`/api/chapters/batch-generate/${taskId}/status`);
-        if (!response.ok) return;
-
-        const status = await response.json();
-        setBatchProgress({
-          status: status.status,
-          total: status.total,
-          completed: status.completed,
-          current_chapter_number: status.current_chapter_number,
-        });
-
-        // 每次轮询时刷新章节列表和分析状态，实时显示新生成的章节和分析进度
-        // 使用 await 确保获取最新章节列表后再加载分析任务状态
-        if (status.completed > 0) {
-          const latestChapters = await refreshChapters();
-          await loadAnalysisTasks(latestChapters);
-
-          // 刷新项目信息以实时更新总字数统计
-          if (currentProject?.id) {
-            const updatedProject = await projectApi.getProject(currentProject.id);
-            setCurrentProject(updatedProject);
-          }
-        }
-
-        // 任务完成或失败，停止轮询
-        if (status.status === 'completed' || status.status === 'failed' || status.status === 'cancelled') {
-          if (batchPollingIntervalRef.current) {
-            clearInterval(batchPollingIntervalRef.current);
-            batchPollingIntervalRef.current = null;
-          }
-
-          setBatchGenerating(false);
-
-          // 立即刷新章节列表和分析任务状态（在显示消息前）
-          // 使用 refreshChapters 返回的最新章节列表传递给 loadAnalysisTasks
-          const finalChapters = await refreshChapters();
-          await loadAnalysisTasks(finalChapters);
-
-          // 刷新项目信息以更新总字数统计
-          if (currentProject?.id) {
-            const updatedProject = await projectApi.getProject(currentProject.id);
-            setCurrentProject(updatedProject);
-          }
-
-          if (status.status === 'completed') {
-            message.success(`批量生成完成！成功生成 ${status.completed} 章`);
-            // 🔔 触发浏览器通知
-            showBrowserNotification(
-              '批量生成完成',
-              `《${currentProject?.title || '项目'}》成功生成 ${status.completed} 章节`,
-              'success'
-            );
-          } else if (status.status === 'failed') {
-            message.error(`批量生成失败：${status.error_message || '未知错误'}`);
-            // 🔔 触发浏览器通知
-            showBrowserNotification(
-              '批量生成失败',
-              status.error_message || '未知错误',
-              'error'
-            );
-          } else if (status.status === 'cancelled') {
-            message.warning('批量生成已取消');
-          }
-
-          // 延迟关闭对话框，让用户看到最终状态
-          setTimeout(() => {
-            setBatchGenerateVisible(false);
-            setBatchTaskId(null);
-            setBatchProgress(null);
-          }, 2000);
-        }
-      } catch (error) {
-        console.error('轮询批量生成状态失败:', error);
-      }
-    };
-
-    // 立即执行一次
-    poll();
-
-    // 每2秒轮询一次
-    batchPollingIntervalRef.current = window.setInterval(poll, 2000);
-  };
-
-  // 取消批量生成
-  const handleCancelBatchGenerate = async () => {
-    if (!batchTaskId) return;
-
-    try {
-      const response = await fetch(`/api/chapters/batch-generate/${batchTaskId}/cancel`, {
-        method: 'POST',
-      });
-
-      if (!response.ok) {
-        throw new Error('取消失败');
-      }
-
-      message.success('批量生成已取消');
-
-      // 取消后立即刷新章节列表和分析任务，显示已生成的章节
-      await refreshChapters();
-      await loadAnalysisTasks();
-
-      // 刷新项目信息以更新总字数统计
-      if (currentProject?.id) {
-        const updatedProject = await projectApi.getProject(currentProject.id);
-        setCurrentProject(updatedProject);
-      }
-    } catch (error: unknown) {
-      const err = error as Error;
-      message.error('取消失败：' + (err.message || '未知错误'));
-    }
-  };
-
-  // 打开批量生成对话框
-  const handleOpenBatchGenerate = async () => {
-    // 找到第一个未生成的章节
-    const firstIncompleteChapter = sortedChapters.find(
-      ch => !ch.content || ch.content.trim() === ''
-    );
-
-    if (!firstIncompleteChapter) {
-      message.info('所有章节都已生成内容');
-      return;
-    }
-
-    // 检查该章节是否可以生成
-    if (!canGenerateChapter(firstIncompleteChapter)) {
-      const reason = getGenerateDisabledReason(firstIncompleteChapter);
-      message.warning(reason);
-      return;
-    }
-
-    // 打开对话框时加载模型列表和Skill列表，等待完成
-    const defaultModel = await loadAvailableModels();
-    loadAvailableSkills();
-
-    console.log('[打开批量生成] defaultModel:', defaultModel);
-    console.log('[打开批量生成] selectedStyleId:', selectedStyleId);
-
-    // 设置批量生成的模型选择状态
-    setBatchSelectedModel(defaultModel || undefined);
-
-    // 重置表单并设置初始值（使用缓存的字数）
-    batchForm.setFieldsValue({
-      startChapterNumber: firstIncompleteChapter.chapter_number,
-      count: 5,
-      enableAnalysis: false,
-      styleId: selectedStyleId,
-      targetWordCount: getCachedWordCount(),
-    });
-
-    setBatchGenerateVisible(true);
-  };
 
   // 手动创建章节(仅one-to-many模式)
-  const showManualCreateChapterModal = () => {
-    // 计算下一个章节号
-    const nextChapterNumber = chapters.length > 0
-      ? Math.max(...chapters.map(c => c.chapter_number)) + 1
-      : 1;
-
-    modal.confirm({
-      title: '手动创建章节',
-      width: 600,
-      centered: true,
-      content: (
-        <Form
-          form={manualCreateForm}
-          layout="vertical"
-          initialValues={{
-            chapter_number: nextChapterNumber,
-            status: 'draft'
-          }}
-          style={{ marginTop: 16 }}
-        >
-          <Form.Item
-            label="章节序号"
-            name="chapter_number"
-            rules={[{ required: true, message: '请输入章节序号' }]}
-            tooltip="建议按顺序创建章节，确保内容连贯性"
-          >
-            <InputNumber min={1} style={{ width: '100%' }} placeholder="自动计算的下一个序号" />
-          </Form.Item>
-
-          <Form.Item
-            label="章节标题"
-            name="title"
-            rules={[{ required: true, message: '请输入标题' }]}
-          >
-            <Input placeholder="例如：第一章 初遇" />
-          </Form.Item>
-
-          <Form.Item
-            label="关联大纲"
-            name="outline_id"
-            rules={[{ required: true, message: '请选择关联的大纲' }]}
-            tooltip="one-to-many模式下，章节必须关联到大纲"
-          >
-            <Select placeholder="请选择所属大纲">
-              {/* 直接使用 store 中的 outlines 数据，而不是从现有章节中提取 */}
-              {[...outlines]
-                .sort((a, b) => a.order_index - b.order_index)
-                .map(outline => (
-                  <Select.Option key={outline.id} value={outline.id}>
-                    第{outline.order_index}卷：{outline.title}
-                  </Select.Option>
-                ))}
-            </Select>
-          </Form.Item>
-
-          <Form.Item
-            label="章节摘要（可选）"
-            name="summary"
-            tooltip="简要描述本章的主要内容和情节发展"
-          >
-            <TextArea
-              rows={4}
-              placeholder="简要描述本章内容..."
-            />
-          </Form.Item>
-
-          <Form.Item
-            label="状态"
-            name="status"
-          >
-            <Select>
-              <Select.Option value="draft">草稿</Select.Option>
-              <Select.Option value="pending">待处理</Select.Option>
-              <Select.Option value="writing">创作中</Select.Option>
-              <Select.Option value="completed">已完成</Select.Option>
-            </Select>
-          </Form.Item>
-        </Form>
-      ),
-      okText: '创建',
-      cancelText: '取消',
-      onOk: async () => {
-        const values = await manualCreateForm.validateFields();
-
-        // 检查章节序号是否已存在
-        const conflictChapter = chapters.find(
-          ch => ch.chapter_number === values.chapter_number
-        );
-
-        if (conflictChapter) {
-          // 显示冲突提示Modal
-          modal.confirm({
-            title: '章节序号冲突',
-            icon: <InfoCircleOutlined style={{ color: token.colorError }} />,
-            width: 500,
-            centered: true,
-            content: (
-              <div>
-                <p style={{ marginBottom: 12 }}>
-                  第 <strong>{values.chapter_number}</strong> 章已存在：
-                </p>
-                <div style={{
-                  padding: 12,
-                  background: token.colorWarningBg,
-                  borderRadius: token.borderRadius,
-                  border: `1px solid ${token.colorWarningBorder}`,
-                  marginBottom: 12
-                }}>
-                  <div><strong>标题：</strong>{conflictChapter.title}</div>
-                  <div><strong>状态：</strong>{getStatusText(conflictChapter.status)}</div>
-                  <div><strong>字数：</strong>{conflictChapter.word_count || 0}字</div>
-                  {conflictChapter.outline_title && (
-                    <div><strong>所属大纲：</strong>{conflictChapter.outline_title}</div>
-                  )}
-                </div>
-                <p style={{ color: token.colorError, marginBottom: 8 }}>
-                  ⚠️ 是否删除旧章节并创建新章节？
-                </p>
-                <p style={{ fontSize: 12, color: token.colorTextSecondary, marginBottom: 0 }}>
-                  删除后将无法恢复，章节内容和分析结果都将被删除。
-                </p>
-              </div>
-            ),
-            okText: '删除并创建',
-            okButtonProps: { danger: true },
-            cancelText: '取消',
-            onOk: async () => {
-              try {
-                // 先删除旧章节
-                await handleDeleteChapter(conflictChapter.id);
-
-                // 等待一小段时间确保删除完成
-                await new Promise(resolve => setTimeout(resolve, 300));
-
-                // 创建新章节
-                await chapterApi.createChapter({
-                  project_id: currentProject.id,
-                  ...values
-                });
-
-                message.success('已删除旧章节并创建新章节');
-                await refreshChapters();
-
-                // 刷新项目信息以更新字数统计
-                const updatedProject = await projectApi.getProject(currentProject.id);
-                setCurrentProject(updatedProject);
-
-                manualCreateForm.resetFields();
-              } catch (error: unknown) {
-                const err = error as Error;
-                message.error('操作失败：' + (err.message || '未知错误'));
-                throw error;
-              }
-            }
-          });
-
-          // 阻止外层Modal关闭
-          return Promise.reject();
-        }
-
-        // 没有冲突，直接创建
-        try {
-          await chapterApi.createChapter({
-            project_id: currentProject.id,
-            ...values
-          });
-          message.success('章节创建成功');
-          await refreshChapters();
-
-          // 刷新项目信息以更新字数统计
-          const updatedProject = await projectApi.getProject(currentProject.id);
-          setCurrentProject(updatedProject);
-
-          manualCreateForm.resetFields();
-        } catch (error: unknown) {
-          const err = error as Error;
-          message.error('创建失败：' + (err.message || '未知错误'));
-          throw error;
-        }
-      }
-    });
-  };
-
-  // 渲染分析状态标签
-
-  // 显示展开规划详情
-  const showExpansionPlanModal = (chapter: Chapter) => {
-    if (!chapter.expansion_plan) return;
-
-    try {
-      const planData: ExpansionPlanData = JSON.parse(chapter.expansion_plan);
-
-      modal.info({
-        title: (
-          <Space style={{ flexWrap: 'wrap' }}>
-            <InfoCircleOutlined style={{ color: token.colorPrimary }} />
-            <span style={{ wordBreak: 'break-word' }}>第{chapter.chapter_number}章展开规划</span>
-          </Space>
-        ),
-        width: isMobile ? 'calc(100vw - 32px)' : 800,
-        centered: true,
-        style: isMobile ? {
-          maxWidth: 'calc(100vw - 32px)',
-          margin: '0 auto',
-          padding: '0 16px'
-        } : undefined,
-        styles: {
-          body: {
-            maxHeight: isMobile ? 'calc(100vh - 200px)' : 'calc(80vh - 110px)',
-            overflowY: 'auto'
-          }
-        },
-        content: (
-          <div style={{ marginTop: 16 }}>
-            <Descriptions
-              column={1}
-              size="small"
-              bordered
-              labelStyle={{
-                whiteSpace: 'normal',
-                wordBreak: 'break-word',
-                width: isMobile ? '80px' : '100px'
-              }}
-              contentStyle={{
-                whiteSpace: 'normal',
-                wordBreak: 'break-word',
-                overflowWrap: 'break-word'
-              }}
-            >
-              <Descriptions.Item label="章节标题">
-                <strong style={{
-                  wordBreak: 'break-word',
-                  whiteSpace: 'normal',
-                  overflowWrap: 'break-word'
-                }}>
-                  {chapter.title}
-                </strong>
-              </Descriptions.Item>
-              <Descriptions.Item label="情感基调">
-                <Tag
-                  color="blue"
-                  style={{
-                    whiteSpace: 'normal',
-                    wordBreak: 'break-word',
-                    height: 'auto',
-                    lineHeight: '1.5',
-                    padding: '4px 8px'
-                  }}
-                >
-                  {planData.emotional_tone}
-                </Tag>
-              </Descriptions.Item>
-              <Descriptions.Item label="冲突类型">
-                <Tag
-                  color="orange"
-                  style={{
-                    whiteSpace: 'normal',
-                    wordBreak: 'break-word',
-                    height: 'auto',
-                    lineHeight: '1.5',
-                    padding: '4px 8px'
-                  }}
-                >
-                  {planData.conflict_type}
-                </Tag>
-              </Descriptions.Item>
-              <Descriptions.Item label="预估字数">
-                <Tag color="green">{planData.estimated_words}字</Tag>
-              </Descriptions.Item>
-              <Descriptions.Item label="叙事目标">
-                <span style={{
-                  wordBreak: 'break-word',
-                  whiteSpace: 'normal',
-                  overflowWrap: 'break-word'
-                }}>
-                  {planData.narrative_goal}
-                </span>
-              </Descriptions.Item>
-              <Descriptions.Item label="关键事件">
-                <Space direction="vertical" size="small" style={{ width: '100%' }}>
-                  {planData.key_events.map((event, idx) => (
-                    <div
-                      key={idx}
-                      style={{
-                        padding: '4px 0',
-                        wordBreak: 'break-word',
-                        whiteSpace: 'normal',
-                        overflowWrap: 'break-word'
-                      }}
-                    >
-                      <Tag color="purple" style={{ flexShrink: 0 }}>{idx + 1}</Tag>{' '}
-                      <span style={{
-                        wordBreak: 'break-word',
-                        whiteSpace: 'normal',
-                        overflowWrap: 'break-word'
-                      }}>
-                        {event}
-                      </span>
-                    </div>
-                  ))}
-                </Space>
-              </Descriptions.Item>
-              <Descriptions.Item label="涉及角色">
-                <Space wrap style={{ maxWidth: '100%' }}>
-                  {planData.character_focus.map((char, idx) => (
-                    <Tag
-                      key={idx}
-                      color="cyan"
-                      style={{
-                        whiteSpace: 'normal',
-                        wordBreak: 'break-word',
-                        height: 'auto',
-                        lineHeight: '1.5'
-                      }}
-                    >
-                      {char}
-                    </Tag>
-                  ))}
-                </Space>
-              </Descriptions.Item>
-              {planData.scenes && planData.scenes.length > 0 && (
-                <Descriptions.Item label="场景规划">
-                  <Space direction="vertical" size="small" style={{ width: '100%' }}>
-                    {planData.scenes.map((scene, idx) => (
-                      <Card
-                        key={idx}
-                        size="small"
-                        style={{
-                          backgroundColor: token.colorFillQuaternary,
-                          maxWidth: '100%',
-                          overflow: 'hidden'
-                        }}
-                      >
-                        <div style={{
-                          marginBottom: 4,
-                          wordBreak: 'break-word',
-                          whiteSpace: 'normal',
-                          overflowWrap: 'break-word'
-                        }}>
-                          <strong>📍 地点：</strong>
-                          <span style={{
-                            wordBreak: 'break-word',
-                            whiteSpace: 'normal',
-                            overflowWrap: 'break-word'
-                          }}>
-                            {scene.location}
-                          </span>
-                        </div>
-                        <div style={{ marginBottom: 4 }}>
-                          <strong>👥 角色：</strong>
-                          <Space
-                            size="small"
-                            wrap
-                            style={{
-                              marginLeft: isMobile ? 0 : 8,
-                              marginTop: isMobile ? 4 : 0,
-                              display: isMobile ? 'flex' : 'inline-flex'
-                            }}
-                          >
-                            {scene.characters.map((char, charIdx) => (
-                              <Tag
-                                key={charIdx}
-                                style={{
-                                  whiteSpace: 'normal',
-                                  wordBreak: 'break-word',
-                                  height: 'auto'
-                                }}
-                              >
-                                {char}
-                              </Tag>
-                            ))}
-                          </Space>
-                        </div>
-                        <div style={{
-                          wordBreak: 'break-word',
-                          whiteSpace: 'normal',
-                          overflowWrap: 'break-word'
-                        }}>
-                          <strong>🎯 目的：</strong>
-                          <span style={{
-                            wordBreak: 'break-word',
-                            whiteSpace: 'normal',
-                            overflowWrap: 'break-word'
-                          }}>
-                            {scene.purpose}
-                          </span>
-                        </div>
-                      </Card>
-                    ))}
-                  </Space>
-                </Descriptions.Item>
-              )}
-            </Descriptions>
-            <Alert
-              message="提示"
-              description="这些是AI在大纲展开时生成的规划信息，可以作为创作章节内容时的参考。"
-              type="info"
-              showIcon
-              style={{ marginTop: 16 }}
-            />
-          </div>
-        ),
-        okText: '关闭',
-      });
-    } catch (error) {
-      console.error('解析展开规划失败:', error);
-      message.error('展开规划数据格式错误');
-    }
-  };
-
-  // 删除章节处理函数
-  const handleDeleteChapter = async (chapterId: string) => {
-    try {
-      await deleteChapter(chapterId);
-
-      // 刷新章节列表
-      await refreshChapters();
-
-      // 刷新项目信息以更新总字数统计
-      if (currentProject) {
-        const updatedProject = await projectApi.getProject(currentProject.id);
-        setCurrentProject(updatedProject);
-      }
-
-      message.success('章节删除成功');
-    } catch (error: unknown) {
-      const err = error as Error;
-      message.error('删除章节失败：' + (err.message || '未知错误'));
-    }
-  };
-
-  // 打开规划编辑器
-  const handleOpenPlanEditor = (chapter: Chapter) => {
-    // 直接打开编辑器,如果没有规划数据则创建新的
-    setEditingPlanChapter(chapter);
-    setPlanEditorVisible(true);
-  };
-
-  // 保存规划信息
-  const handleSavePlan = async (planData: ExpansionPlanData) => {
-    if (!editingPlanChapter) return;
-
-    try {
-      const response = await fetch(`/api/chapters/${editingPlanChapter.id}/expansion-plan`, {
-        method: 'PUT',
-        headers: {
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify(planData),
-      });
-
-      if (!response.ok) {
-        const error = await response.json();
-        throw new Error(error.detail || '更新失败');
-      }
-
-      // 刷新章节列表
-      await refreshChapters();
-
-      message.success('规划信息更新成功');
-
-      // 关闭编辑器
-      setPlanEditorVisible(false);
-      setEditingPlanChapter(null);
-    } catch (error: unknown) {
-      const err = error as Error;
-      message.error('保存规划失败：' + (err.message || '未知错误'));
-      throw error;
-    }
-  };
 
   // 打开阅读器
 
@@ -1532,10 +326,10 @@ export default function Chapters() {
             章节管理
           </h2>
           <Tag
-            color={currentProject.outline_mode === 'one-to-one' ? 'blue' : 'green'}
+            color={currentProject?.outline_mode === 'one-to-one' ? 'blue' : 'green'}
             style={{ width: 'fit-content' }}
           >
-            {currentProject.outline_mode === 'one-to-one'
+            {currentProject?.outline_mode === 'one-to-one'
               ? '传统模式：章节由大纲管理，请在大纲页面操作'
               : '细化模式：章节可在大纲页面展开'}
           </Tag>
@@ -1548,7 +342,7 @@ export default function Chapters() {
             onChange={(e) => setChapterSearchKeyword(e.target.value)}
             style={{ width: isMobile ? '100%' : 280 }}
           />
-          {currentProject.outline_mode === 'one-to-many' && (
+          {currentProject?.outline_mode === 'one-to-many' && (
             <Button
               icon={<PlusOutlined />}
               onClick={showManualCreateChapterModal}
@@ -1613,7 +407,7 @@ export default function Chapters() {
             const val = e.target.checked;
             setAutoAnalysisEnabled(val);
             localStorage.setItem('auto_analysis_enabled', String(val));
-            if (!val) { setChapterCountdowns({}); Object.values(countdownIntervalsRef.current).forEach(clearInterval); countdownIntervalsRef.current = {}; }
+            if (!val) { clearAllCountdowns(); }
           }}
         >
           启用章节生成后自动分析
@@ -1642,7 +436,7 @@ export default function Chapters() {
           <Empty description="还没有章节，开始创作吧！" />
         ) : filteredSortedChapters.length === 0 ? (
           <Empty description="未找到匹配章节" />
-        ) : currentProject.outline_mode === 'one-to-one' ? (
+        ) : currentProject?.outline_mode === 'one-to-one' ? (
           // one-to-one 模式：直接显示扁平列表
           <List
             dataSource={pagedSortedChapters}
@@ -1902,7 +696,7 @@ return (
                           修改
                         </Button>,
                         // 只在 one-to-many 模式下显示删除按钮
-                        ...(currentProject.outline_mode === 'one-to-many' ? [
+                        ...(currentProject?.outline_mode === 'one-to-many' ? [
                           <Popconfirm
                             title="确定删除这个章节吗？"
                             description="删除后将无法恢复，章节内容和分析结果都将被删除。"
@@ -2031,7 +825,7 @@ return (
                               title="修改"
                             />
                             {/* 只在 one-to-many 模式下显示删除按钮 */}
-                            {currentProject.outline_mode === 'one-to-many' && (
+                            {currentProject?.outline_mode === 'one-to-many' && (
                               <Popconfirm
                                 title="确定删除？"
                                 description="删除后无法恢复"
@@ -2106,19 +900,19 @@ return (
             label="章节标题"
             name="title"
             tooltip={
-              currentProject.outline_mode === 'one-to-one'
+              currentProject?.outline_mode === 'one-to-one'
                 ? "章节标题由大纲管理，请在大纲页面修改"
                 : "一对多模式下可以修改章节标题"
             }
             rules={
-              currentProject.outline_mode === 'one-to-many'
+              currentProject?.outline_mode === 'one-to-many'
                 ? [{ required: true, message: '请输入章节标题' }]
                 : undefined
             }
           >
             <Input
               placeholder="输入章节标题"
-              disabled={currentProject.outline_mode === 'one-to-one'}
+              disabled={currentProject?.outline_mode === 'one-to-one'}
             />
           </Form.Item>
 
@@ -2513,7 +1307,7 @@ return (
 
             // 刷新项目信息以更新字数统计
             if (currentProject) {
-              projectApi.getProject(currentProject.id)
+              projectApi.getProject(currentProject?.id)
                 .then(updatedProject => {
                   setCurrentProject(updatedProject);
                 })
@@ -2834,7 +1628,7 @@ return (
             visible={planEditorVisible}
             planData={parsedPlanData}
             chapterSummary={editingPlanChapter.summary || null}
-            projectId={currentProject.id}
+            projectId={currentProject?.id}
             onSave={handleSavePlan}
             onCancel={() => {
               setPlanEditorVisible(false);
