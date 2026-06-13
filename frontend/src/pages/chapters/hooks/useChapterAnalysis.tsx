@@ -3,6 +3,7 @@ import { message, Tag } from 'antd';
 import { SyncOutlined, CheckCircleOutlined, CloseCircleOutlined } from '@ant-design/icons';
 import { chapterApi } from '../../../services/api';
 import type { AnalysisTask, Chapter } from '../../../types';
+import { useStore } from '../../../store';
 
 /**
  * useChapterAnalysis
@@ -15,8 +16,8 @@ import type { AnalysisTask, Chapter } from '../../../types';
  *   - renderAnalysisStatus: 渲染分析状态 Tag
  *
  * Inputs:
- *   - currentProject: from useStore
- *   - chapters: from useStore (some callers refresh tasks after list updates)
+ *   - currentProjectId: caller-provided (zustand selector in caller)
+ *   - chapters: internally read from useStore (auto reload on chapters.length change)
  */
 export function useChapterAnalysis(
   currentProjectId: string | null | undefined,
@@ -25,6 +26,10 @@ export function useChapterAnalysis(
   const [analysisVisible, setAnalysisVisible] = useState(false);
   const [analysisChapterId, setAnalysisChapterId] = useState<string | null>(null);
   const [batchAnalyzingUnanalyzed, setBatchAnalyzingUnanalyzed] = useState(false);
+
+  // 内部读 store: chapters 变化时自动 reload analysis tasks
+  // 用 length 而非整个 chapters 引用,避免每次 setState 触发不必要的 reload
+  const chapters = useStore((state) => state.chapters);
 
   const analysisPollingIntervalRef = useRef<number | null>(null);
   const activeAnalysisPollingIdsRef = useRef<Set<string>>(new Set());
@@ -38,6 +43,15 @@ export function useChapterAnalysis(
       }
     };
   }, []);
+
+  // chapters 列表变化时自动 reload analysis tasks
+  // 这样 loadAnalysisTasks 调用方不再必须传 chaptersToLoad (兼容旧调用方式)
+  useEffect(() => {
+    if (currentProjectId && chapters.length > 0) {
+      void loadAnalysisTasks(chapters);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [currentProjectId, chapters.length]);
 
   const clearAnalysisPollingIfIdle = useCallback(() => {
     if (activeAnalysisPollingIdsRef.current.size === 0 && analysisPollingIntervalRef.current) {
@@ -97,7 +111,8 @@ export function useChapterAnalysis(
   // 加载所有章节的分析任务状态（批量接口，避免逐章请求风暴）
   // 接受可选的 chaptersToLoad 参数，解决 React 状态更新延迟导致的问题
   const loadAnalysisTasks = async (chaptersToLoad?: Chapter[]) => {
-    const targetChapters = chaptersToLoad;
+    // 优先用入参, fallback 到 store (调用方不一定传, 比如首次进入项目 / 弹窗关闭后的 reload)
+    const targetChapters = chaptersToLoad ?? useStore.getState().chapters;
     if (!targetChapters || targetChapters.length === 0 || !currentProjectId) return;
 
     const chapterIds = targetChapters
@@ -114,7 +129,7 @@ export function useChapterAnalysis(
     try {
       const response = await chapterApi.getBatchAnalysisStatuses(currentProjectId, chapterIds);
       const tasksMap = response.items || {};
-      setAnalysisTasksMap(tasksMap);
+      setAnalysisTasksMap((prev) => ({ ...prev, ...tasksMap }));
 
       activeAnalysisPollingIdsRef.current.clear();
       Object.entries(tasksMap).forEach(([chapterId, task]) => {
