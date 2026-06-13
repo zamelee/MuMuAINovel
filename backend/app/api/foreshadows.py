@@ -1,5 +1,6 @@
 """伏笔管理API路由"""
 from fastapi import APIRouter, Depends, HTTPException, Request, Query
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession
 from typing import Optional, List
 
@@ -379,3 +380,43 @@ async def sync_foreshadows_from_analysis(
     except Exception as e:
         logger.error(f"❌ 同步伏笔失败: {str(e)}")
         raise HTTPException(status_code=500, detail=f"同步伏笔失败: {str(e)}")
+
+
+class AutoResolveResponse(BaseModel):
+    """Batch 3: ForeshadowAutoResolver 响应"""
+    checked_count: int = 0
+    suggested_resolve: list = []
+    auto_abandoned: list = []
+    dry_run: bool = False
+    abandoned_threshold: int = 3
+    error: Optional[str] = None
+
+
+@router.post("/projects/{project_id}/auto-resolve", response_model=AutoResolveResponse)
+async def auto_resolve_overdue_endpoint(
+    project_id: str,
+    current_chapter: int = Query(..., ge=1, description="当前章节号"),
+    abandoned_threshold: int = Query(3, ge=1, le=20, description="超过多少章后自动 abandoned"),
+    dry_run: bool = Query(False, description="True 只报告建议, 不实际修改 DB"),
+    request: Request = None,
+    db: AsyncSession = Depends(get_db),
+) -> AutoResolveResponse:
+    """
+    Batch 3: ForeshadowAutoResolver - 自动处理超期伏笔
+    
+    规则:
+    - 超期 1..abandoned_threshold 章 -> suggested_resolve (不改状态)
+    - 超期 > abandoned_threshold 章 -> auto_abandoned (status=abandoned, dry_run=True 不改)
+    """
+    user_id = getattr(request.state, "user_id", None) if request else None
+    if not user_id:
+        raise HTTPException(status_code=401, detail="未登录")
+    await verify_project_access(project_id, user_id, db)
+    result = await foreshadow_service.auto_resolve_overdue(
+        db=db,
+        project_id=project_id,
+        current_chapter=current_chapter,
+        abandoned_threshold=abandoned_threshold,
+        dry_run=dry_run,
+    )
+    return AutoResolveResponse(**result)

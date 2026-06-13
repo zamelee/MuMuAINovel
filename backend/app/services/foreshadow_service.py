@@ -1692,4 +1692,105 @@ class ForeshadowService:
 
 
 # 创建全局服务实例
+    async def auto_resolve_overdue(
+        self,
+        db: AsyncSession,
+        project_id: str,
+        current_chapter: int,
+        abandoned_threshold: int = 3,
+        dry_run: bool = False,
+    ) -> Dict[str, Any]:
+        """
+        Batch 3: ForeshadowAutoResolver - 自动处理超期伏笔 (rules-based)
+
+        规则 (无 LLM, 纯规则):
+        - 超期 1..abandoned_threshold 章: 建议回收 (不改状态, 仅报告)
+        - 超期 > abandoned_threshold 章: 自动 abandoned (除非 dry_run)
+
+        Args:
+            db: 数据库会话
+            project_id: 项目ID
+            current_chapter: 当前章节号
+            abandoned_threshold: 超期多少章后自动 abandoned (默认 3)
+            dry_run: True 只报告不修改 DB
+
+        Returns:
+            {
+                checked_count: int,
+                suggested_resolve: List[Dict],   # 超期 1..abandoned_threshold 章
+                auto_abandoned: List[Dict],     # 超期 > abandoned_threshold 章
+                dry_run: bool,
+                abandoned_threshold: int
+            }
+        """
+        try:
+            stats = {
+                "checked_count": 0,
+                "suggested_resolve": [],
+                "auto_abandoned": [],
+                "dry_run": dry_run,
+                "abandoned_threshold": abandoned_threshold,
+            }
+
+            # 查询: 已埋入 + 已过目标回收章节 的伏笔
+            result = await db.execute(
+                select(Foreshadow).where(
+                    and_(
+                        Foreshadow.project_id == project_id,
+                        Foreshadow.status == "planted",
+                        Foreshadow.target_resolve_chapter_number.isnot(None),
+                        Foreshadow.target_resolve_chapter_number < current_chapter,
+                    )
+                ).order_by(Foreshadow.target_resolve_chapter_number)
+            )
+            overdue_list = list(result.scalars().all())
+            stats["checked_count"] = len(overdue_list)
+
+            for fs in overdue_list:
+                overdue_chapters = current_chapter - (fs.target_resolve_chapter_number or 0)
+                if overdue_chapters <= 0:
+                    continue
+                record = {
+                    "id": fs.id,
+                    "title": fs.title,
+                    "plant_chapter_number": fs.plant_chapter_number,
+                    "target_resolve_chapter_number": fs.target_resolve_chapter_number,
+                    "current_chapter": current_chapter,
+                    "overdue_chapters": overdue_chapters,
+                    "importance": fs.importance,
+                }
+                if overdue_chapters > abandoned_threshold:
+                    # 超过阈值: 自动 abandoned
+                    if not dry_run:
+                        fs.status = "abandoned"
+                        await db.flush()
+                        logger.info("[foreshadow_auto] auto-abandoned: " + fs.title + " (overdue " + str(overdue_chapters) + " chapters)")
+                    stats["auto_abandoned"].append(record)
+                else:
+                    # 建议回收 (1..abandoned_threshold 章超期)
+                    stats["suggested_resolve"].append(record)
+
+            if not dry_run:
+                await db.commit()
+            elif stats["auto_abandoned"] or stats["suggested_resolve"]:
+                # dry_run 也 rollback 以防有未 flush 改动
+                await db.rollback()
+
+            logger.info("[foreshadow_auto] checked=" + str(stats["checked_count"]) + ", suggested=" + str(len(stats["suggested_resolve"])) + ", abandoned=" + str(len(stats["auto_abandoned"])) + ", dry_run=" + str(dry_run))
+            return stats
+        except Exception as e:
+            try:
+                await db.rollback()
+            except Exception:
+                pass
+            logger.error("[foreshadow_auto] failed: " + str(e))
+            return {
+                "checked_count": 0,
+                "suggested_resolve": [],
+                "auto_abandoned": [],
+                "dry_run": dry_run,
+                "abandoned_threshold": abandoned_threshold,
+                "error": str(e),
+            }
+
 foreshadow_service = ForeshadowService()

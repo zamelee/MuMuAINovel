@@ -4730,6 +4730,59 @@ async def regenerate_chapter_stream(
                                 logger.info("[scene_state] inject prev state: loc=" + str(prev_state.get("location")) + " present=" + str(len(prev_state.get("characters_present", []))) + " left=" + str(len(prev_state.get("characters_left", []))))
                 except Exception as ss_e:
                     logger.warning("[scene_state] load prev state failed: " + str(ss_e))
+                # === Batch 3 钩子: 大纲冲突修剪 (OutlinePruningAgent) + 超期伏笔建议 (ForeshadowAutoResolver) ===
+                try:
+                    from app.services.outline_pruning_agent import outline_pruning_agent
+                    from app.services.foreshadow_service import foreshadow_service
+
+                    # 1. 大纲冲突检测 (用 prev_state + outline)
+                    if outline and prev_chapter:
+                        try:
+                            prev_state_for_pruning = await get_previous_scene_state(temp_db, prev_chapter.id)
+                        except Exception:
+                            prev_state_for_pruning = None
+                        if prev_state_for_pruning:
+                            outline_dict = {
+                                "title": getattr(outline, "title", "") or "",
+                                "content": getattr(outline, "content", "") or "",
+                                "character_focus": getattr(outline, "character_focus", None),
+                                "structure": getattr(outline, "structure", None),
+                            }
+                            try:
+                                pruning_result = outline_pruning_agent.detect_conflicts(outline_dict, prev_state_for_pruning)
+                            except Exception as p_e:
+                                pruning_result = {"has_conflicts": False, "warning_text": ""}
+                                logger.warning("[batch3] detect_conflicts failed: " + str(p_e))
+                            if pruning_result.get("has_conflicts"):
+                                warning_text = pruning_result.get("warning_text", "")
+                                if warning_text:
+                                    previous_context_parts.append("[Batch 3 大纲冲突预警]\n" + warning_text)
+                                pruned_focus = pruning_result.get("pruned_outline", {}).get("character_focus", [])
+                                logger.info("[batch3] outline conflicts: count=" + str(pruning_result.get("conflict_count")) + " pruned_focus=" + str(pruned_focus))
+
+                    # 2. 超期伏笔建议回收 (dry_run, 不改 DB)
+                    if chapter.chapter_number and chapter.chapter_number >= 1:
+                        try:
+                            fs_result = await foreshadow_service.auto_resolve_overdue(
+                                db=temp_db,
+                                project_id=chapter.project_id,
+                                current_chapter=chapter.chapter_number,
+                                abandoned_threshold=3,
+                                dry_run=True,
+                            )
+                            suggested = fs_result.get("suggested_resolve", []) or []
+                            abandoned = fs_result.get("auto_abandoned", []) or []
+                            if suggested or abandoned:
+                                logger.info("[batch3] foreshadow: " + str(len(suggested)) + " suggested, " + str(len(abandoned)) + " auto-abandoned (dry_run)")
+                                for s_item in suggested:
+                                    logger.info("[batch3]   suggest resolve: id=" + str(s_item.get("id")) + " title=" + str(s_item.get("title")) + " overdue=" + str(s_item.get("overdue_chapters")))
+                                for a_item in abandoned:
+                                    logger.info("[batch3]   auto abandon: id=" + str(a_item.get("id")) + " title=" + str(a_item.get("title")) + " overdue=" + str(a_item.get("overdue_chapters")))
+                        except Exception as fs_e:
+                            logger.warning("[batch3] foreshadow auto_resolve_overdue failed: " + str(fs_e))
+                except Exception as b3_e:
+                    logger.warning("[batch3] hook failed: " + str(b3_e))
+
             except Exception as ctx_e:
                 logger.warning(f'构建前置章节上下文失败: {ctx_e}')
             previous_context_str = '\n\n'.join(previous_context_parts) if previous_context_parts else ''

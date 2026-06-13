@@ -591,7 +591,7 @@ class PromptService:
 {chapter_careers}
 </careers>
 
-<foreshadow_reminders priority="P2">
+<foreshadow_reminders priority="P0">
 【🎯 伏笔提醒】
 {foreshadow_reminders}
 </foreshadow_reminders>
@@ -657,7 +657,7 @@ class PromptService:
 {chapter_careers}
 </careers>
 
-<foreshadow_reminders priority="P2">
+<foreshadow_reminders priority="P0">
 【🎯 伏笔提醒】
 {foreshadow_reminders}
 </foreshadow_reminders>
@@ -730,7 +730,7 @@ class PromptService:
 {chapter_careers}
 </careers>
 
-<foreshadow_reminders priority="P2">
+<foreshadow_reminders priority="P0">
 【🎯 伏笔提醒】
 {foreshadow_reminders}
 </foreshadow_reminders>
@@ -821,7 +821,7 @@ class PromptService:
 {chapter_careers}
 </careers>
 
-<foreshadow_reminders priority="P1">
+<foreshadow_reminders priority="P0">
 【🎯 伏笔提醒 - 需关注】
 {foreshadow_reminders}
 </foreshadow_reminders>
