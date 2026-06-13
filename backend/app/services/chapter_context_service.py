@@ -643,11 +643,15 @@ class OneToManyContextBuilder:
         project_id: str,
         db: AsyncSession,
         include_emotion_trend: bool = False,
+        include_character_state_trend: bool = False,
     ) -> Optional[str]:
         """构建最近10章上下文（三段式回退：分析摘要 → 大纲规划 → 生成摘要）
 
         Z.3: include_emotion_trend=True 时, 在块顶部加一行"情感趋势 (近N章)",
         汇总各章 emotional_tone + intensity, 防止跨章节情感断裂.
+        Z.4: include_character_state_trend=True 时, 在情感趋势下加"角色轨迹 (近N章)",
+        按角色 group by name 汇总所有 character_states, 出现 ≥2 次的角色画轨迹,
+        1 次的画"初登场". 防止角色性格漂移.
         """
         try:
             result = await db.execute(
@@ -761,6 +765,12 @@ class OneToManyContextBuilder:
                 trend_line = self._build_emotional_trend(analysis_map, recent_chapters)
                 if trend_line:
                     lines.insert(1, trend_line)
+
+            # Z.4: 跨章角色轨迹 (按角色 group by name) —— 插在 emotion trend 之后
+            if include_character_state_trend:
+                cs_trend_lines = self._build_character_state_trend(analysis_map, recent_chapters)
+                for offset, cs_line in enumerate(cs_trend_lines):
+                    lines.insert(2 + offset, cs_line)
 
             if len(lines) <= 1:
                 return None
@@ -982,6 +992,73 @@ class OneToManyContextBuilder:
         if not trend_parts:
             return ""
         return f"情感趋势 (近{len(trend_parts)}章): " + " -> ".join(trend_parts)
+
+    @staticmethod
+    def _build_character_state_trend(
+        analysis_map: Dict[str, Any],
+        recent_chapters: list,
+    ) -> List[str]:
+        """Z.4: 跨章角色轨迹 (按角色 group by name).
+
+        输入: analysis_map {chapter_id: {character_states: [{character_name, state_before, state_after}, ...]}}
+              recent_chapters [(chapter_id, chapter_number, ...), ...]
+        输出: List[str], 多行
+          ["角色轨迹 (近3章):",
+           "  宋知意: ch1[犹豫 -> 紧张] -> ch2[紧张 -> 坚定] -> ch3[坚定 -> 释然]",
+           "  陆宴: ch1[得意 -> 警惕] -> ch2[警惕 -> 退缩]",
+           "  秦峥: ch3[冷静, 初登场]"]
+        算法:
+          1. group by character_name across chapters
+          2. 出现 ≥2 次画轨迹, 1 次画"初登场"
+          3. 排序: mention 次数降序, 取 top 5
+        """
+        # 1. 收集
+        char_appearances: Dict[str, List[Tuple[int, str, str]]] = {}
+        ordered = sorted(recent_chapters, key=lambda r: r[1])
+        for ch_id, ch_num, _t, _p, _s in ordered:
+            a = analysis_map.get(ch_id)
+            if not a:
+                continue
+            for cs in a.get("character_states") or []:
+                if not isinstance(cs, dict):
+                    continue
+                name = (cs.get("character_name") or "").strip()
+                if not name:
+                    continue
+                before = cs.get("state_before") or ""
+                after = cs.get("state_after") or ""
+                if not before and not after:
+                    continue
+                char_appearances.setdefault(name, []).append((ch_num, before, after))
+
+        if not char_appearances:
+            return []
+
+        # 2. 排序 (mention 次数降序, 同次数按首次出现章节升序)
+        sorted_chars = sorted(
+            char_appearances.items(),
+            key=lambda kv: (-len(kv[1]), kv[1][0][0]),
+        )[:5]
+
+        # 3. 格式化
+        total_chapters = len(ordered)
+        lines = [f"角色轨迹 (近{total_chapters}章):"]
+        for name, appearances in sorted_chars:
+            if len(appearances) >= 2:
+                # 多章: ch1[b->a] -> ch2[b->a] -> ...
+                arc_parts = []
+                for ch_num, before, after in appearances:
+                    b = before or "—"
+                    a = after or "—"
+                    arc_parts.append(f"ch{ch_num}[{b} -> {a}]")
+                lines.append("  " + name + ": " + " -> ".join(arc_parts))
+            else:
+                # 单章: ch1[b->a, 初登场]
+                ch_num, before, after = appearances[0]
+                b = before or "—"
+                a = after or "—"
+                lines.append(f"  {name}: ch{ch_num}[{b} -> {a}, 初登场]")
+        return lines
 
     def _format_plot_analysis_block(analysis: Dict[str, Any], chapter_number: int) -> str:
         """

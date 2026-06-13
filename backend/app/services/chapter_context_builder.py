@@ -29,6 +29,8 @@ class ChapterContextBuilder:
         "recent_chapters": True,
         # Z.3: 情感曲线 (单章 + 趋势) - 用现成 plot_analysis.emotional_curve JSON 字段, 零 schema 变更
         "emotion_curve": True,
+        # Z.4: 角色状态 (单章 + 跨章轨迹) - 用现成 plot_analysis.character_states JSON 字段, 零 schema 变更
+        "character_state": True,
     }
     # Z.5: 完整字段集 (含未来扩展位, 当前 API 只暴露 DEFAULT_ENABLED 的 key)
     # 未来 emotion_curve / character_state 接入时, 把 key 移到 DEFAULT_ENABLED + 在这里登记即可
@@ -42,6 +44,8 @@ class ChapterContextBuilder:
         "recent_chapters",
         # Z.3: 情感曲线
         "emotion_curve",
+        # Z.4: 角色状态
+        "character_state",
     )
     # Z.5: 缓存 TTL (秒) —— 避免每章都查 DB
     _ENABLED_CACHE_TTL = 60
@@ -104,6 +108,62 @@ class ChapterContextBuilder:
         # 至少要有一行非标题内容
         if len(lines) <= 1:
             return ""
+        return "\n".join(lines)
+
+    async def _load_prev_character_states(self, db, prev_chapter) -> Optional[List[Dict[str, Any]]]:
+        """Z.4: 从 PlotAnalysis 读 prev chapter 的角色状态变化列表.
+
+        返回 List[Dict], 每项: {character_id, character_name, state_before, state_after, ...}
+        无 PlotAnalysis 或无 character_states, 返回 None.
+        """
+        try:
+            from app.models.memory import PlotAnalysis
+            from sqlalchemy import select
+            result = await db.execute(
+                select(PlotAnalysis.character_states)
+                .where(PlotAnalysis.chapter_id == prev_chapter.id)
+            )
+            row = result.first()
+            if not row:
+                return None
+            char_states = row[0]
+            if not char_states or not isinstance(char_states, list):
+                return None
+            # 过滤: 必须有 character_name 且 (state_before 或 state_after)
+            valid = []
+            for cs in char_states:
+                if isinstance(cs, dict):
+                    name = (cs.get("character_name") or "").strip()
+                    before = cs.get("state_before") or ""
+                    after = cs.get("state_after") or ""
+                    if name and (before or after):
+                        valid.append({
+                            "character_id": cs.get("character_id", ""),
+                            "character_name": name,
+                            "state_before": before,
+                            "state_after": after,
+                        })
+            return valid if valid else None
+        except Exception as e:
+            logger.warning("[builder] _load_prev_character_states failed: " + str(e))
+            return None
+
+    def _format_prev_character_state_block(self, char_states: List[Dict[str, Any]]) -> str:
+        """Z.4: 把 prev chapter 角色状态变化格式化为 prompt 块.
+
+        示例输出:
+          上一章角色状态变化:
+            宋知意: 犹豫 -> 坚定
+            陆宴: 得意 -> 警惕
+        """
+        if not char_states:
+            return ""
+        lines = ["上一章角色状态变化:"]
+        for cs in char_states[:5]:  # 最多 5 个角色
+            name = cs.get("character_name", "")
+            before = cs.get("state_before") or "—"
+            after = cs.get("state_after") or "—"
+            lines.append(f"  {name}: {before} -> {after}")
         return "\n".join(lines)
 
     async def _resolve_enabled(self, db, user_id: Optional[str]) -> Dict[str, bool]:
@@ -280,6 +340,14 @@ class ChapterContextBuilder:
                 if block:
                     parts.append(block)
                     logger.info("[builder] P1 prev emotion injected: tone=" + str(emo.get("tone")))
+        # Z.4: 上一章角色状态变化 (单章视角) —— 防止章节间角色性格漂移
+        if enabled["character_state"]:
+            char_states = await self._load_prev_character_states(db, prev_chapter)
+            if char_states:
+                block = self._format_prev_character_state_block(char_states)
+                if block:
+                    parts.append(block)
+                    logger.info("[builder] P1 prev character_state injected: n=" + str(len(char_states)))
         if enabled["recent_chapters"]:
             try:
                 from app.services.chapter_context_service import OneToManyContextBuilder
@@ -288,6 +356,8 @@ class ChapterContextBuilder:
                     chapter=chapter, project_id=chapter.project_id, db=db,
                     # Z.3: emotion_curve 控制是否在 recent 块顶部加情感趋势行
                     include_emotion_trend=enabled["emotion_curve"],
+                    # Z.4: character_state 控制是否在 recent 块顶部加角色轨迹行
+                    include_character_state_trend=enabled["character_state"],
                 )
                 if recent_ctx:
                     parts.append(recent_ctx)
@@ -535,6 +605,126 @@ async def _self_test_z3_emotion_curve_disabled():
     return True
 
 
+async def _self_test_z4_load_prev_char_states_none():
+    """Z.4: 无 PlotAnalysis / 无 character_states 时, _load 返回 None"""
+    from unittest.mock import AsyncMock, MagicMock
+    prev_chapter = MagicMock()
+    prev_chapter.id = "prev-1"
+
+    # 无数据
+    r = MagicMock()
+    r.first.return_value = None
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=r)
+
+    result = await chapter_context_builder._load_prev_character_states(db=db, prev_chapter=prev_chapter)
+    assert result is None
+    print("  [PASS] z4 no PlotAnalysis -> None")
+
+    # 有 PlotAnalysis 但 character_states 为空
+    r2 = MagicMock()
+    r2.first.return_value = ([],)
+    db2 = MagicMock()
+    db2.execute = AsyncMock(return_value=r2)
+    result2 = await chapter_context_builder._load_prev_character_states(db=db2, prev_chapter=prev_chapter)
+    assert result2 is None
+    print("  [PASS] z4 empty character_states -> None")
+    return True
+
+
+async def _self_test_z4_load_prev_char_states_full():
+    """Z.4: 有 character_states 数据时, 返回过滤后的 list"""
+    from unittest.mock import AsyncMock, MagicMock
+    prev_chapter = MagicMock()
+    prev_chapter.id = "prev-2"
+
+    char_states_data = [
+        {"character_id": "c1", "character_name": "宋知意", "state_before": "犹豫", "state_after": "坚定"},
+        {"character_id": "c2", "character_name": "陆宴", "state_before": "得意", "state_after": "警惕"},
+        {"character_id": "c3", "character_name": "无名", "state_before": "", "state_after": ""},  # 应被过滤
+        {"character_name": "", "state_before": "x", "state_after": "y"},  # 无 name, 应被过滤
+    ]
+    r = MagicMock()
+    r.first.return_value = (char_states_data,)
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=r)
+
+    result = await chapter_context_builder._load_prev_character_states(db=db, prev_chapter=prev_chapter)
+    assert result is not None
+    assert len(result) == 2, "应只保留 2 个有效角色, got: " + str(result)
+    assert result[0]["character_name"] == "宋知意"
+    assert result[0]["state_before"] == "犹豫"
+    assert result[1]["character_name"] == "陆宴"
+    print("  [PASS] z4 with character_states -> filtered list")
+    return True
+
+
+async def _self_test_z4_format_char_state_block():
+    """Z.4: _format_prev_character_state_block 格式化正确"""
+    char_states = [
+        {"character_name": "宋知意", "state_before": "犹豫", "state_after": "坚定"},
+        {"character_name": "陆宴", "state_before": "得意", "state_after": "警惕"},
+    ]
+    block = chapter_context_builder._format_prev_character_state_block(char_states)
+    assert "上一章角色状态变化:" in block
+    assert "宋知意: 犹豫 -> 坚定" in block
+    assert "陆宴: 得意 -> 警惕" in block
+    print("  [PASS] z4 format block full")
+
+    # 空列表 -> 空字符串
+    block2 = chapter_context_builder._format_prev_character_state_block([])
+    assert block2 == ""
+    print("  [PASS] z4 format block empty -> empty string")
+    return True
+
+
+async def _self_test_z4_character_state_disabled():
+    """Z.4: enabled['character_state']=False 时, build_previous_context 不注入"""
+    from unittest.mock import AsyncMock, MagicMock, patch
+
+    prev_chapter = MagicMock()
+    prev_chapter.id = "prev-3"
+    prev_chapter.content = "前章内容..."
+    prev_chapter.end_anchor = None
+
+    chapter = MagicMock()
+    chapter.id = "curr"
+    chapter.project_id = "proj-1"
+    chapter.chapter_number = 2
+
+    r = MagicMock()
+    r.first.return_value = (
+        [{"character_name": "宋知意", "state_before": "犹豫", "state_after": "坚定"}],
+    )
+    r.scalar_one_or_none.return_value = None
+    s = MagicMock()
+    s.all.return_value = []
+    r.scalars.return_value = s
+    db = MagicMock()
+    db.execute = AsyncMock(return_value=r)
+
+    chapter_context_builder.invalidate_enabled_cache()
+    with patch.object(chapter_context_builder, "_resolve_enabled") as mock_resolve:
+        mock_resolve.return_value = {
+            "scene_state": False,
+            "outline_pruning_warning": False,
+            "foreshadow_logger_only": False,
+            "prev_content_tail": False,
+            "prev_end_anchor": False,
+            "prev_summary": False,
+            "recent_chapters": False,
+            "emotion_curve": False,
+            "character_state": False,  # Z.4 关闭
+        }
+        parts = await chapter_context_builder.build_previous_context(
+            chapter=chapter, db=db, memory_service=MagicMock()
+        )
+
+    assert parts == [], "全部 enabled=False 应返回空, got: " + str(parts)
+    print("  [PASS] z4 character_state disabled -> no block")
+    return True
+
+
 def run_self_tests():
     # HANDOFF v1 兜底: 触发 app.models 完整初始化, 解决循环 import
     try:
@@ -557,6 +747,10 @@ def run_self_tests():
         ("z3_load_prev_emotion_full", _self_test_z3_load_prev_emotion_full),
         ("z3_format_emotion_block", _self_test_z3_format_emotion_block),
         ("z3_emotion_curve_disabled", _self_test_z3_emotion_curve_disabled),
+        ("z4_load_prev_char_states_none", _self_test_z4_load_prev_char_states_none),
+        ("z4_load_prev_char_states_full", _self_test_z4_load_prev_char_states_full),
+        ("z4_format_char_state_block", _self_test_z4_format_char_state_block),
+        ("z4_character_state_disabled", _self_test_z4_character_state_disabled),
     ]
     for name, coro_fn in tests:
         try:
