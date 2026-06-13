@@ -64,6 +64,8 @@ import type {
   BatchAnalysisStatusResponse,
   BatchAnalyzeUnanalyzedRequest,
   BatchAnalyzeUnanalyzedResponse,
+  ChapterContextEnabledResponse,
+  ChapterContextEnabledUpdate,
 } from '../types';
 
 interface MCPPluginSimpleCreate {
@@ -344,6 +346,14 @@ export const settingsApi = {
 
   updateSystemSecuritySettings: (data: import('../types').SystemSecuritySettingsUpdate) =>
     api.put<unknown, import('../types').SystemSecuritySettings>('/settings/system/security', data),
+    // Z.5: 章节上下文注入字段可配置
+  getChapterContextEnabled: () =>
+    api.get<unknown, ChapterContextEnabledResponse>('/settings/chapter-context'),
+
+  updateChapterContextEnabled: (data: ChapterContextEnabledUpdate) =>
+    api.put<unknown, { message: string; enabled: Record<string, boolean> }>('/settings/chapter-context', data),
+
+
 };
 
 export const projectApi = {

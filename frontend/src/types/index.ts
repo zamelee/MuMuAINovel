@@ -115,6 +115,31 @@ export interface SettingsUpdate {
   preferences?: string;
 }
 
+// ======================================================================
+// Z.5: 章节上下文注入字段可配置 (chapter_context_enabled)
+// ======================================================================
+export type ChapterContextKey =
+  | 'scene_state'
+  | 'outline_pruning_warning'
+  | 'foreshadow_logger_only'
+  | 'prev_content_tail'
+  | 'prev_end_anchor'
+  | 'prev_summary'
+  | 'recent_chapters'
+  | 'emotion_curve'      // Z.3
+  | 'character_state';   // Z.4
+
+export interface ChapterContextEnabledResponse {
+  enabled: Record<ChapterContextKey, boolean>;
+  all_known_keys: ChapterContextKey[];
+  is_default: boolean;
+}
+
+export interface ChapterContextEnabledUpdate {
+  enabled: Record<ChapterContextKey, boolean>;
+}
+
+
 // API预设相关类型定义
 export interface APIKeyPresetConfig {
   api_provider: string;

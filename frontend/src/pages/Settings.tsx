@@ -1,7 +1,8 @@
 import { useState, useEffect } from 'react';
 import { Card, Form, Input, Button, Select, Slider, InputNumber, message, Space, Typography, Spin, Modal, Alert, Grid, Tabs, List, Tag, Popconfirm, Empty, Row, Col, theme } from 'antd';
-import { SaveOutlined, DeleteOutlined, ReloadOutlined, InfoCircleOutlined, CheckCircleOutlined, CloseCircleOutlined, ThunderboltOutlined, PlusOutlined, EditOutlined, CopyOutlined, WarningOutlined, PictureOutlined } from '@ant-design/icons';
+import { SaveOutlined, DeleteOutlined, ReloadOutlined, InfoCircleOutlined, CheckCircleOutlined, CloseCircleOutlined, ThunderboltOutlined, PlusOutlined, EditOutlined, CopyOutlined, WarningOutlined, PictureOutlined, ExperimentOutlined } from '@ant-design/icons';
 import { settingsApi, mcpPluginApi } from '../services/api';
+import ChapterContextSettings from '../components/ChapterContextSettings';
 import type { SettingsUpdate, APIKeyPreset, PresetCreateRequest, APIKeyPresetConfig } from '../types';
 import { eventBus, EventNames } from '../store/eventBus';
 
@@ -1871,6 +1872,12 @@ export default function SettingsPage() {
                     </Spin>
                   ),
                 },
+                {
+                  key: 'chapter_context',
+                  label: <Space size={6}><ExperimentOutlined />章节上下文注入</Space>,
+                  children: <ChapterContextSettings />,
+                },
+
                 {
                   key: 'presets',
                   label: <Space size={6}><CopyOutlined />配置预设</Space>,
