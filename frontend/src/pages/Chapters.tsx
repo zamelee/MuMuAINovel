@@ -485,8 +485,8 @@ export default function Chapters() {
                           if (isCountingDown) { cancelChapterCountdown(item.id); }
                           else { handleShowAnalysis(item.id); }
                         }}
-                        disabled={!hasContent || isAnalyzing}
-                        loading={isAnalyzing}
+                        disabled={!hasContent || (isAnalyzing && !isCountingDown)}
+                        loading={isAnalyzing && !isCountingDown}
                         style={isCountingDown ? { color: token.colorWarning, fontWeight: 'bold' } : undefined}
                       >
                       {isCountingDown ? `${countdown}s 后取消` : (isAnalyzing ? '分析中' : '分析')}
@@ -575,8 +575,8 @@ return (
       else { handleShowAnalysis(item.id); }
     }}
     size="small"
-    disabled={!hasContent || isAnalyzing}
-    loading={isAnalyzing}
+    disabled={!hasContent || (isAnalyzing && !isCountingDown)}
+    loading={isAnalyzing && !isCountingDown}
     style={isCountingDown ? { color: token.colorWarning, fontWeight: 'bold' } : undefined}
   >
   {isCountingDown ? `${countdown}s 取消` : ''}
@@ -679,8 +679,8 @@ return (
       if (isCountingDown) { cancelChapterCountdown(item.id); }
       else { handleShowAnalysis(item.id); }
     }}
-    disabled={!hasContent || isAnalyzing}
-    loading={isAnalyzing}
+    disabled={!hasContent || (isAnalyzing && !isCountingDown)}
+    loading={isAnalyzing && !isCountingDown}
     style={isCountingDown ? { color: token.colorWarning, fontWeight: 'bold' } : undefined}
   >
   {isCountingDown ? `${countdown}s 后取消` : (isAnalyzing ? '分析中' : '分析')}
@@ -808,8 +808,8 @@ return (
       else { handleShowAnalysis(item.id); }
     }}
     size="small"
-    disabled={!hasContent || isAnalyzing}
-    loading={isAnalyzing}
+    disabled={!hasContent || (isAnalyzing && !isCountingDown)}
+    loading={isAnalyzing && !isCountingDown}
     style={isCountingDown ? { color: token.colorWarning, fontWeight: 'bold' } : undefined}
   >
   {isCountingDown ? `${countdown}s 取消` : ''}
