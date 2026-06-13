@@ -4680,111 +4680,17 @@ async def regenerate_chapter_stream(
             # 重新生成专用：构建前置章节上下文（Plan 1）
             previous_context_parts = []
             try:
-                if chapter.chapter_number and chapter.chapter_number > 1:
-                    prev_q = await temp_db.execute(
-                        select(Chapter)
-                        .where(Chapter.project_id == chapter.project_id)
-                        .where(Chapter.chapter_number == chapter.chapter_number - 1)
-                        .order_by(Chapter.created_at.desc())
-                        .limit(1)
-                    )
-                    prev_chapter = prev_q.scalar_one_or_none()
-                    if prev_chapter:
-                        prev_content = prev_chapter.content or ''
-                        if prev_content:
-                            tail = prev_content[-500:] if len(prev_content) > 500 else prev_content
-                            previous_context_parts.append('【上一章末尾500字】\n' + tail)
-                        prev_end_anchor = getattr(prev_chapter, 'end_anchor', None)
-                        if prev_end_anchor:
-                            previous_context_parts.append('【上一章结束锚点】\n' + prev_end_anchor)
-                        try:
-                            sum_q = await temp_db.execute(
-                                select(StoryMemory.content)
-                                .where(StoryMemory.chapter_id == prev_chapter.id, StoryMemory.memory_type == 'chapter_summary')
-                                .order_by(StoryMemory.created_at.desc())
-                                .limit(1)
-                            )
-                            prev_summary = sum_q.scalar_one_or_none()
-                            if prev_summary:
-                                previous_context_parts.append('【上一章摘要】\n' + prev_summary)
-                        except Exception as sum_e:
-                            logger.warning(f'获取上一章摘要失败: {sum_e}')
-                from app.services.chapter_context_service import OneToManyContextBuilder
-                recent_builder = OneToManyContextBuilder(memory_service=memory_service)
-                recent_ctx = await recent_builder._build_recent_chapters_context(
+                from app.services.chapter_context_builder import chapter_context_builder
+                _builder_parts = await chapter_context_builder.build_previous_context(
                     chapter=chapter,
-                    project_id=chapter.project_id,
-                    db=temp_db
+                    db=temp_db,
+                    memory_service=memory_service,
                 )
-                if recent_ctx:
-                    previous_context_parts.append(recent_ctx)
-                # === Batch 2 注入: 上一章场景状态 (SceneStateTracker) ===
-                try:
-                    from app.services.scene_state_extractor import get_previous_scene_state, format_scene_state_block
-                    if prev_chapter:
-                        prev_state = await get_previous_scene_state(temp_db, prev_chapter.id)
-                        if prev_state:
-                            block = format_scene_state_block(prev_state)
-                            if block:
-                                previous_context_parts.append(block)
-                                logger.info("[scene_state] inject prev state: loc=" + str(prev_state.get("location")) + " present=" + str(len(prev_state.get("characters_present", []))) + " left=" + str(len(prev_state.get("characters_left", []))))
-                except Exception as ss_e:
-                    logger.warning("[scene_state] load prev state failed: " + str(ss_e))
-                # === Batch 3 钩子: 大纲冲突修剪 (OutlinePruningAgent) + 超期伏笔建议 (ForeshadowAutoResolver) ===
-                try:
-                    from app.services.outline_pruning_agent import outline_pruning_agent
-                    from app.services.foreshadow_service import foreshadow_service
+                previous_context_parts.extend(_builder_parts)
+                logger.info("[builder] build_previous_context done: parts=" + str(len(_builder_parts)))
+            except Exception as bld_e:
+                logger.warning("[builder] build_previous_context failed: " + str(bld_e))
 
-                    # 1. 大纲冲突检测 (用 prev_state + outline)
-                    if outline and prev_chapter:
-                        try:
-                            prev_state_for_pruning = await get_previous_scene_state(temp_db, prev_chapter.id)
-                        except Exception:
-                            prev_state_for_pruning = None
-                        if prev_state_for_pruning:
-                            outline_dict = {
-                                "title": getattr(outline, "title", "") or "",
-                                "content": getattr(outline, "content", "") or "",
-                                "character_focus": getattr(outline, "character_focus", None),
-                                "structure": getattr(outline, "structure", None),
-                            }
-                            try:
-                                pruning_result = outline_pruning_agent.detect_conflicts(outline_dict, prev_state_for_pruning)
-                            except Exception as p_e:
-                                pruning_result = {"has_conflicts": False, "warning_text": ""}
-                                logger.warning("[batch3] detect_conflicts failed: " + str(p_e))
-                            if pruning_result.get("has_conflicts"):
-                                warning_text = pruning_result.get("warning_text", "")
-                                if warning_text:
-                                    previous_context_parts.append("[Batch 3 大纲冲突预警]\n" + warning_text)
-                                pruned_focus = pruning_result.get("pruned_outline", {}).get("character_focus", [])
-                                logger.info("[batch3] outline conflicts: count=" + str(pruning_result.get("conflict_count")) + " pruned_focus=" + str(pruned_focus))
-
-                    # 2. 超期伏笔建议回收 (dry_run, 不改 DB)
-                    if chapter.chapter_number and chapter.chapter_number >= 1:
-                        try:
-                            fs_result = await foreshadow_service.auto_resolve_overdue(
-                                db=temp_db,
-                                project_id=chapter.project_id,
-                                current_chapter=chapter.chapter_number,
-                                abandoned_threshold=3,
-                                dry_run=True,
-                            )
-                            suggested = fs_result.get("suggested_resolve", []) or []
-                            abandoned = fs_result.get("auto_abandoned", []) or []
-                            if suggested or abandoned:
-                                logger.info("[batch3] foreshadow: " + str(len(suggested)) + " suggested, " + str(len(abandoned)) + " auto-abandoned (dry_run)")
-                                for s_item in suggested:
-                                    logger.info("[batch3]   suggest resolve: id=" + str(s_item.get("id")) + " title=" + str(s_item.get("title")) + " overdue=" + str(s_item.get("overdue_chapters")))
-                                for a_item in abandoned:
-                                    logger.info("[batch3]   auto abandon: id=" + str(a_item.get("id")) + " title=" + str(a_item.get("title")) + " overdue=" + str(a_item.get("overdue_chapters")))
-                        except Exception as fs_e:
-                            logger.warning("[batch3] foreshadow auto_resolve_overdue failed: " + str(fs_e))
-                except Exception as b3_e:
-                    logger.warning("[batch3] hook failed: " + str(b3_e))
-
-            except Exception as ctx_e:
-                logger.warning(f'构建前置章节上下文失败: {ctx_e}')
             previous_context_str = '\n\n'.join(previous_context_parts) if previous_context_parts else ''
 
             # 当前章节结束锚点（Plan 2）
