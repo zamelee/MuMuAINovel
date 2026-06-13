@@ -952,28 +952,26 @@ function PlanPanel({
           title="编辑结束锚点"
           icon={<span>🔚</span>}
           currentTheme={currentTheme}
-          actions={
-            <>
-              <Button
-                size="small"
-                type="primary"
-                icon={<CheckOutlined />}
-                loading={savingAnchor}
-                onClick={handleSaveAnchor}
-              >
-                保存
-              </Button>
-              <Button
-                size="small"
-                icon={<CloseOutlined />}
-                onClick={handleCancelEditAnchor}
-                disabled={savingAnchor}
-              >
-                取消
-              </Button>
-            </>
-          }
         >
+          <Space style={{ marginBottom: 8 }} wrap>
+            <Button
+              size="small"
+              type="primary"
+              icon={<CheckOutlined />}
+              loading={savingAnchor}
+              onClick={handleSaveAnchor}
+            >
+              保存
+            </Button>
+            <Button
+              size="small"
+              icon={<CloseOutlined />}
+              onClick={handleCancelEditAnchor}
+              disabled={savingAnchor}
+            >
+              取消
+            </Button>
+          </Space>
           <Input.TextArea
             value={anchorDraft}
             onChange={(e) => setAnchorDraft(e.target.value)}
@@ -989,28 +987,30 @@ function PlanPanel({
           title="结束锚点"
           icon={<span>🔚</span>}
           currentTheme={currentTheme}
-          actions={
-            <>
-              <Tooltip title="AI 重新生成（覆盖现有锚点）">
-                <Button
-                  size="small"
-                  type="text"
-                  icon={refillingAnchor ? <SyncOutlined spin /> : <ReloadOutlined />}
-                  loading={refillingAnchor}
-                  onClick={handleRefillAnchor}
-                />
-              </Tooltip>
-              <Tooltip title="手动编辑">
-                <Button
-                  size="small"
-                  type="text"
-                  icon={<EditOutlined />}
-                  onClick={handleStartEditAnchor}
-                />
-              </Tooltip>
-            </>
-          }
         >
+          <Space style={{ marginBottom: 8 }} wrap>
+            <Tooltip title="AI 重新生成（覆盖现有锚点）">
+              <Button
+                size="small"
+                type="default"
+                icon={refillingAnchor ? <SyncOutlined spin /> : <ReloadOutlined />}
+                loading={refillingAnchor}
+                onClick={handleRefillAnchor}
+              >
+                AI 重新生成
+              </Button>
+            </Tooltip>
+            <Tooltip title="手动编辑">
+              <Button
+                size="small"
+                type="default"
+                icon={<EditOutlined />}
+                onClick={handleStartEditAnchor}
+              >
+                手动编辑
+              </Button>
+            </Tooltip>
+          </Space>
           <div style={{ fontSize: 12, color: '#1677ff', lineHeight: 1.6, whiteSpace: 'pre-wrap' }}>
             {localEndAnchor}
           </div>
@@ -1020,11 +1020,12 @@ function PlanPanel({
           title="结束锚点"
           icon={<span>🔚</span>}
           currentTheme={currentTheme}
-          actions={
+        >
+          <Space style={{ marginBottom: 8 }} wrap>
             <Tooltip title="AI 自动生成结束锚点">
               <Button
                 size="small"
-                type="text"
+                type="primary"
                 icon={refillingAnchor ? <SyncOutlined spin /> : <ReloadOutlined />}
                 loading={refillingAnchor}
                 onClick={handleRefillAnchor}
@@ -1032,8 +1033,17 @@ function PlanPanel({
                 AI 生成
               </Button>
             </Tooltip>
-          }
-        >
+            <Tooltip title="手动新建一个空锚点，然后进入编辑">
+              <Button
+                size="small"
+                type="default"
+                icon={<EditOutlined />}
+                onClick={handleStartEditAnchor}
+              >
+                手动新建
+              </Button>
+            </Tooltip>
+          </Space>
           <div style={{ fontSize: 12, opacity: 0.65, fontStyle: 'italic' }}>
             暂未设置结束锚点，AI 续写时无法保证镜头定格。建议先补充。
           </div>
