@@ -1830,23 +1830,8 @@ async def generate_chapter_content_stream(
                 except Exception as plant_error:
                     logger.warning(f"⚠️ 自动标记伏笔埋入失败: {str(plant_error)}")
                 
-                # 创建分析任务
-                analysis_task = AnalysisTask(
-                    chapter_id=chapter_id,
-                    user_id=current_user_id,
-                    project_id=project.id,
-                    status='pending',
-                    progress=0
-                )
-                db_session.add(analysis_task)
-                await db_session.commit()
-                await db_session.refresh(analysis_task)
-                
-                task_id = analysis_task.id
-                logger.info(f"📋 已创建分析任务: {task_id}")
-                
-                # ✅ 分析任务已创建（状态pending），不再自动启动
-                # 倒计时由前端控制，调用 POST /api/chapters/{chapter_id}/start-analysis 启动
+                                # ✅ (Batch 4 优化) 分析任务不在生成时创建, 等前端倒计时归零调 /start-analysis 时才创建
+                # 这样用户取消倒计时后 DB 干净, 不会留 status=pending 的孤儿
                 
                 yield await tracker.saving("章节保存完成", 0.8)
                 
@@ -1902,18 +1887,11 @@ async def generate_chapter_content_stream(
                 # 发送结果数据
                 yield await tracker.result({
                     'word_count': new_word_count,
-                    'analysis_task_id': task_id,
+                    'analysis_task_id': None,  # (Batch 4 优化) 不在生成时创建 task
                     'quick_check': quick_check
                 })
                 
-                # 发送分析排队事件（分析任务已创建，等待前端倒计时触发）
-                yield await SSEResponse.send_event(
-                    event='analysis_queued',
-                    data={
-                        'task_id': task_id,
-                        'message': '分析任务已创建，等待启动'
-                    }
-                )
+                # (Batch 4 优化) 不再发送 analysis_queued 事件, task 在前端倒计时归零后才创建
                 
                 # 发送完成信号
                 yield await tracker.done()
@@ -3296,10 +3274,16 @@ async def start_chapter_analysis(
     db: AsyncSession = Depends(get_db),
     # user_id from request state (consistent with rest of codebase)
 ):
-    """启动已创建的pending分析任务（由前端倒计时或手动触发）"""
+    """启动/创建并启动 章节分析任务
+
+    (Batch 4 优化) 等倒计时归零才创建 task:
+    1. 查 pending task, 存在 -> 直接启动
+    2. 不存在 -> 查 chapter, 创建 task, 启动
+    3. 用户取消倒计时后, DB 里没有 task, 端点干净
+    """
     user_id = getattr(request.state, "user_id", "system")
 
-    # 查找pending任务
+    # 1. 查 pending task
     result = await db.execute(
         select(AnalysisTask).where(
             AnalysisTask.chapter_id == chapter_id,
@@ -3308,20 +3292,36 @@ async def start_chapter_analysis(
     )
     task = result.scalar_one_or_none()
 
+    # 2. (Batch 4 优化) 不存在则查 chapter + 创建 task
     if not task:
-        return {"started": False, "message": "没有待处理的分析任务"}
+        chapter_result = await db.execute(
+            select(Chapter).where(Chapter.id == chapter_id)
+        )
+        chapter = chapter_result.scalar_one_or_none()
+        if not chapter:
+            return {"started": False, "message": "章节不存在"}
+        task = AnalysisTask(
+            chapter_id=chapter_id,
+            user_id=user_id,
+            project_id=chapter.project_id,
+            status="pending",
+            progress=0
+        )
+        db.add(task)
+        await db.commit()
+        await db.refresh(task)
+        logger.info(f"📋 start-analysis 创建 task: {task.id} chapter={chapter_id}")
 
-    # 获取AI服务
+    # 3. 获取 AI 服务
     user_ai_service = await get_user_ai_service_from_db_by_usage(
         user_id=user_id,
         db=db,
         usage="chapter_analysis"
     )
-
     if not user_ai_service:
         raise HTTPException(status_code=400, detail="请先配置章节内容分析API")
 
-    # 启动后台分析（background_tasks 由 FastAPI 依赖注入）
+    # 4. 启动后台分析
     background_tasks.add_task(
         analyze_chapter_background,
         chapter_id=chapter_id,

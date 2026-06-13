@@ -979,7 +979,7 @@ export default function Chapters() {
       //     'isAnalyzing=true'，后端 task 由孤儿清理回收。
       // 这样按钮的 isAnalyzing 判断只反映后端真实状态 'running'，
       // 倒计时期间按钮不会被错误地 disable。
-      if (result?.analysis_task_id) {
+      if (result && autoAnalysisEnabled) {
         if (autoAnalysisEnabled) {
           message.success('AI创作成功！' + autoAnalysisDelay + '秒后自动开始分析');
           startChapterCountdown(editingId);
