@@ -1466,6 +1466,11 @@ class OneToOneContextBuilder:
                 context.continuation_point = None
                 context.previous_chapter_summary = None
                 logger.info(f"  ⚠️ P1-上一章内容: 无")
+
+            # === Z.3/Z.4: 注入 prev chapter 情感 + 角色状态 (1-1 模式支持) ===
+            # 即使 prev_chapter.content 为空 (chapter 还在草稿), 仍可注入 emotion/character_state
+            if prev_chapter:
+                await self._inject_prev_chapter_meta(prev_chapter, context, user_id, db)
         else:
             context.continuation_point = None
             context.previous_chapter_summary = None
@@ -1586,6 +1591,48 @@ class OneToOneContextBuilder:
         logger.info(f"📊 [1-1模式] 上下文构建完成: 总长度 {context.context_stats['total_length']} 字符")
         
         return context
+
+    async def _inject_prev_chapter_meta(
+        self,
+        prev_chapter,
+        context: "OneToOneContext",
+        user_id: str,
+        db: AsyncSession,
+    ) -> None:
+        """(Batch 4-b1) 注入 prev chapter 情感曲线 + 角色状态到 context.continuation_point
+
+        - emotion_curve 启用 -> 追加 prev 章 emotional_tone/intensity 块
+        - character_state 启用 -> 追加 prev 章 character_states 块
+        - 若 context.continuation_point 已有内容, 用 \n\n 追加; 否则直接赋值
+        - 任何异常都降级为 warning, 不影响主流程
+        """
+        try:
+            from app.services.chapter_context_builder import chapter_context_builder
+            enabled = await chapter_context_builder._resolve_enabled(db, user_id)
+            meta_blocks = []
+            if enabled.get("emotion_curve"):
+                emo = await chapter_context_builder._load_prev_emotion(db, prev_chapter)
+                if emo:
+                    emo_block = chapter_context_builder._format_prev_emotion_block(emo)
+                    if emo_block:
+                        meta_blocks.append(emo_block)
+                        logger.info("  ✅ Z.3 1-1 模式 prev emotion injected")
+            if enabled.get("character_state"):
+                char_states = await chapter_context_builder._load_prev_character_states(db, prev_chapter)
+                if char_states:
+                    cs_block = chapter_context_builder._format_prev_character_state_block(char_states)
+                    if cs_block:
+                        meta_blocks.append(cs_block)
+                        logger.info(f"  ✅ Z.4 1-1 模式 prev character_state injected: n={len(char_states)}")
+            if meta_blocks:
+                meta_text = "\n\n".join(meta_blocks)
+                if context.continuation_point:
+                    context.continuation_point = context.continuation_point + "\n\n" + meta_text
+                else:
+                    # prev chapter 无 content (草稿状态), 但有 emotion/character, 也注入
+                    context.continuation_point = meta_text
+        except Exception as z_e:
+            logger.warning(f"  ⚠️ Z.3/Z.4 1-1 模式 emotion/character_state 注入失败: {str(z_e)}")
     
     def _build_outline_from_structure(
         self,
