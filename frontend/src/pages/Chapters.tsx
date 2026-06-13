@@ -2226,7 +2226,7 @@ export default function Chapters() {
                     const isCountingDown = countdown !== undefined && countdown > 0;
 
                     return (
-                      <Tooltip title={isCountingDown ? '点击取消自动分析' : (!hasContent ? '请先生成章节内容' : isAnalyzing ? '分析进行中，请稍候...' : '')}>
+                      <Tooltip title={isCountingDown ? `点击取消自动分析 (${countdown}s 后开始)` : (!hasContent ? '请先生成章节内容' : isAnalyzing ? '分析进行中，请稍候...' : '')}>
                       <Button
                         type="text"
                         icon={isAnalyzing ? <SyncOutlined spin /> : isCountingDown ? <CloseCircleOutlined /> : <FundOutlined />}
@@ -2238,7 +2238,7 @@ export default function Chapters() {
                         loading={isAnalyzing}
                         style={isCountingDown ? { color: token.colorWarning, fontWeight: 'bold' } : undefined}
                       >
-                      {isCountingDown ? '取消' : (isAnalyzing ? '分析中' : '分析')}
+                      {isCountingDown ? `${countdown}s 后取消` : (isAnalyzing ? '分析中' : '分析')}
                       </Button>
                       </Tooltip>
                     );
@@ -2315,7 +2315,7 @@ const hasContent = item.content && item.content.trim() !== '';
 const isCountingDown = countdown !== undefined && countdown > 0;
 
 return (
-  <Tooltip title={isCountingDown ? '点击取消自动分析' : (!hasContent ? '请先生成章节内容' : isAnalyzing ? '分析中' : '')}>
+  <Tooltip title={isCountingDown ? `点击取消自动分析 (${countdown}s 后开始)` : (!hasContent ? '请先生成章节内容' : isAnalyzing ? '分析中' : '')}>
   <Button
     type="text"
     icon={isAnalyzing ? <SyncOutlined spin /> : isCountingDown ? <CloseCircleOutlined /> : <FundOutlined />}
@@ -2328,7 +2328,7 @@ return (
     loading={isAnalyzing}
     style={isCountingDown ? { color: token.colorWarning, fontWeight: 'bold' } : undefined}
   >
-  {isCountingDown ? '取消' : ''}
+  {isCountingDown ? `${countdown}s 取消` : ''}
   </Button>
   </Tooltip>
 );
@@ -2420,7 +2420,7 @@ const hasContent = item.content && item.content.trim() !== '';
 const isCountingDown = countdown !== undefined && countdown > 0;
 
 return (
-  <Tooltip title={isCountingDown ? '点击取消自动分析' : (!hasContent ? '请先生成章节内容' : isAnalyzing ? '分析进行中，请稍候...' : '')}>
+  <Tooltip title={isCountingDown ? `点击取消自动分析 (${countdown}s 后开始)` : (!hasContent ? '请先生成章节内容' : isAnalyzing ? '分析进行中，请稍候...' : '')}>
   <Button
     type="text"
     icon={isAnalyzing ? <SyncOutlined spin /> : isCountingDown ? <CloseCircleOutlined /> : <FundOutlined />}
@@ -2432,7 +2432,7 @@ return (
     loading={isAnalyzing}
     style={isCountingDown ? { color: token.colorWarning, fontWeight: 'bold' } : undefined}
   >
-  {isCountingDown ? '取消' : (isAnalyzing ? '分析中' : '分析')}
+  {isCountingDown ? `${countdown}s 后取消` : (isAnalyzing ? '分析中' : '分析')}
   </Button>
   </Tooltip>
 );
@@ -2548,7 +2548,7 @@ const hasContent = item.content && item.content.trim() !== '';
 const isCountingDown = countdown !== undefined && countdown > 0;
 
 return (
-  <Tooltip title={isCountingDown ? '点击取消自动分析' : (!hasContent ? '请先生成章节内容' : isAnalyzing ? '分析中' : '')}>
+  <Tooltip title={isCountingDown ? `点击取消自动分析 (${countdown}s 后开始)` : (!hasContent ? '请先生成章节内容' : isAnalyzing ? '分析中' : '')}>
   <Button
     type="text"
     icon={isAnalyzing ? <SyncOutlined spin /> : isCountingDown ? <CloseCircleOutlined /> : <FundOutlined />}
@@ -2561,7 +2561,7 @@ return (
     loading={isAnalyzing}
     style={isCountingDown ? { color: token.colorWarning, fontWeight: 'bold' } : undefined}
   >
-  {isCountingDown ? '取消' : ''}
+  {isCountingDown ? `${countdown}s 取消` : ''}
   </Button>
   </Tooltip>
 );
