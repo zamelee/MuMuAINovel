@@ -4685,6 +4685,8 @@ async def regenerate_chapter_stream(
                     chapter=chapter,
                     db=temp_db,
                     memory_service=memory_service,
+                    # Z.5: 传 user_id, 让 settings.preferences['chapter_context_enabled'] 生效
+                    user_id=getattr(request.state, 'user_id', None),
                 )
                 previous_context_parts.extend(_builder_parts)
                 logger.info("[builder] build_previous_context done: parts=" + str(len(_builder_parts)))
